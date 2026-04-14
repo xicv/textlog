@@ -8,6 +8,9 @@ pub enum Error {
     #[error("Failed to parse configuration: {0}")]
     ConfigParse(#[from] toml::de::Error),
 
+    #[error("Failed to serialize configuration: {0}")]
+    ConfigSerialize(#[from] toml::ser::Error),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
