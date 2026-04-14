@@ -1,0 +1,69 @@
+[package]
+name = "textlog"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "macOS clipboard + OCR daemon exposed to Claude Code as an MCP server"
+authors = ["xicao"]
+license = "MIT"
+
+[[bin]]
+name = "tl"
+path = "src/main.rs"
+
+[features]
+default = ["mcp", "service"]
+mcp = []
+service = []
+
+[dependencies]
+# CLI
+clap = { version = "4.6", features = ["derive"] }
+clap_complete = "4.6"
+
+# Async runtime
+tokio = { version = "1.51", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Internal logging (not clipboard log)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Standard paths
+dirs = "6"
+
+# Regex — privacy filters + self-log-path detection
+regex = "1"
+
+# SQLite ring buffer + FTS5
+rusqlite = { version = "0.39", features = ["bundled", "chrono"] }
+
+# Content hashing for dedup
+sha2 = "0.11"
+
+# macOS FFI
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-vision = "0.3"
+
+# macOS notifications
+notify-rust = "4"
+
+# MCP server SDK (stdio JSON-RPC 2.0)
+rmcp = "1.4"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
