@@ -73,6 +73,16 @@ fn hex_nibble(c: u8) -> crate::error::Result<u8> {
     }
 }
 
+/// One row of a `Storage::search` result. `duplicate_of` is `Some(id)` if
+/// another row in the *same* result set carries the same `sha256` and was
+/// chosen as canonical (first occurrence in the ts-DESC ordering). The
+/// MCP layer uses this to elide redundant content from Claude's view.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub row: CaptureRow,
+    pub duplicate_of: Option<i64>,
+}
+
 /// One row of the captures table — also the unit appended to the daily
 /// Markdown file. `id` is `0` until the row has been inserted into SQLite.
 #[derive(Debug, Clone)]

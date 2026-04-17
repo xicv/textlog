@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::error::{Error, Result};
-use crate::storage::{markdown, CaptureRow, Kind};
+use crate::storage::{markdown, CaptureRow, Kind, SearchHit};
 
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
@@ -122,6 +122,57 @@ impl Storage {
         }
     }
 
+    /// Full-text search via FTS5. Returns up to `limit` rows matching
+    /// `query` (FTS5 syntax), optionally bounded to `ts >= since`.
+    /// Each hit carries a `duplicate_of` marker pointing at the
+    /// canonical (first occurrence in ts-DESC order) row sharing its
+    /// sha256 within this result set.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: u32,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<SearchHit>> {
+        let conn = self.lock()?;
+        let since_str = since.map(|t| t.to_rfc3339());
+
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.ts, c.kind, c.sha256, c.size_bytes, c.content,
+                    c.ocr_confidence, c.source_app, c.source_url, c.md_path
+             FROM captures c
+             JOIN captures_fts f ON c.id = f.rowid
+             WHERE captures_fts MATCH ?1
+               AND (?2 IS NULL OR c.ts >= ?2)
+             ORDER BY c.ts DESC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt
+            .query_map(
+                rusqlite::params![query, since_str, limit as i64],
+                row_from_sqlite,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = rows.into_iter().collect::<Result<Vec<CaptureRow>>>()?;
+
+        // duplicate_of: first occurrence (in ts-DESC order) per sha256 is
+        // canonical; later occurrences point back to that id.
+        let mut canonical: std::collections::HashMap<[u8; 32], i64> =
+            std::collections::HashMap::new();
+        let hits = rows
+            .into_iter()
+            .map(|row| {
+                let dup_of = canonical.get(&row.sha256).copied();
+                if dup_of.is_none() {
+                    canonical.insert(row.sha256, row.id);
+                }
+                SearchHit { row, duplicate_of: dup_of }
+            })
+            .collect();
+
+        Ok(hits)
+    }
+
     /// Delete every row whose `ts >= ts`. MD files are *not* touched
     /// (per spec — user can delete those manually).
     pub fn clear_since(&self, ts: DateTime<Utc>) -> Result<usize> {
@@ -156,7 +207,31 @@ fn init_schema(conn: &Connection) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS idx_captures_ts     ON captures(ts DESC);
          CREATE INDEX IF NOT EXISTS idx_captures_sha256 ON captures(sha256);
-         CREATE INDEX IF NOT EXISTS idx_captures_kind   ON captures(kind);",
+         CREATE INDEX IF NOT EXISTS idx_captures_kind   ON captures(kind);
+
+         CREATE VIRTUAL TABLE IF NOT EXISTS captures_fts USING fts5(
+             content,
+             content='captures',
+             content_rowid='id'
+         );
+
+         CREATE TRIGGER IF NOT EXISTS captures_ai
+         AFTER INSERT ON captures BEGIN
+             INSERT INTO captures_fts(rowid, content) VALUES (new.id, new.content);
+         END;
+
+         CREATE TRIGGER IF NOT EXISTS captures_ad
+         AFTER DELETE ON captures BEGIN
+             INSERT INTO captures_fts(captures_fts, rowid, content)
+             VALUES ('delete', old.id, old.content);
+         END;
+
+         CREATE TRIGGER IF NOT EXISTS captures_au
+         AFTER UPDATE ON captures BEGIN
+             INSERT INTO captures_fts(captures_fts, rowid, content)
+             VALUES ('delete', old.id, old.content);
+             INSERT INTO captures_fts(rowid, content) VALUES (new.id, new.content);
+         END;",
     )?;
     Ok(())
 }
@@ -246,7 +321,6 @@ fn decode_row(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn row(
@@ -516,5 +590,136 @@ mod tests {
         assert_eq!(g.source_url.as_deref(), Some("https://example.com/x"));
         assert!((g.ocr_confidence.unwrap() - 0.87).abs() < 1e-5);
         assert_eq!(g.md_path, r.md_path);
+    }
+
+    #[test]
+    fn search_finds_word_match() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        s.insert(&row(Utc::now(), Kind::Text, 1, "hello world", tmp.path())).unwrap();
+        s.insert(&row(Utc::now(), Kind::Text, 2, "unrelated content", tmp.path())).unwrap();
+
+        let hits = s.search("hello", 10, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].row.content.as_deref(), Some("hello world"));
+        assert_eq!(hits[0].duplicate_of, None);
+    }
+
+    #[test]
+    fn search_returns_empty_for_no_match() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        s.insert(&row(Utc::now(), Kind::Text, 1, "alpha bravo", tmp.path())).unwrap();
+        let hits = s.search("zulu", 10, None).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_caps_by_limit() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        for i in 0..5 {
+            s.insert(&row(
+                Utc::now() + chrono::Duration::seconds(i as i64),
+                Kind::Text,
+                i as u8 + 1,
+                "needle in the stack",
+                tmp.path(),
+            ))
+            .unwrap();
+        }
+        let hits = s.search("needle", 2, None).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn search_filters_by_since_timestamp() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 4, 17, 10, 0, 0).unwrap();
+        s.insert(&row(base, Kind::Text, 1, "needle one", tmp.path())).unwrap();
+        s.insert(&row(base + chrono::Duration::seconds(60), Kind::Text, 2, "needle two", tmp.path()))
+            .unwrap();
+        s.insert(&row(base + chrono::Duration::seconds(120), Kind::Text, 3, "needle three", tmp.path()))
+            .unwrap();
+
+        let cutoff = base + chrono::Duration::seconds(60);
+        let hits = s.search("needle", 10, Some(cutoff)).unwrap();
+        // Only rows at-or-after cutoff: "needle two" and "needle three".
+        assert_eq!(hits.len(), 2);
+        let texts: Vec<&str> = hits
+            .iter()
+            .filter_map(|h| h.row.content.as_deref())
+            .collect();
+        assert!(texts.contains(&"needle two"));
+        assert!(texts.contains(&"needle three"));
+        assert!(!texts.contains(&"needle one"));
+    }
+
+    #[test]
+    fn search_orders_by_ts_descending() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 4, 17, 10, 0, 0).unwrap();
+        s.insert(&row(base, Kind::Text, 1, "needle old", tmp.path())).unwrap();
+        s.insert(&row(base + chrono::Duration::seconds(60), Kind::Text, 2, "needle new", tmp.path()))
+            .unwrap();
+        let hits = s.search("needle", 10, None).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].row.content.as_deref(), Some("needle new"));
+        assert_eq!(hits[1].row.content.as_deref(), Some("needle old"));
+    }
+
+    #[test]
+    fn search_marks_duplicate_of_within_result_set() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 4, 17, 10, 0, 0).unwrap();
+        // Three rows, same sha256 (and identical content so they all match).
+        let id_old = s
+            .insert(&row(base, Kind::Text, 7, "needle dup", tmp.path()))
+            .unwrap();
+        let id_mid = s
+            .insert(&row(
+                base + chrono::Duration::seconds(60),
+                Kind::Text,
+                7,
+                "needle dup",
+                tmp.path(),
+            ))
+            .unwrap();
+        let id_new = s
+            .insert(&row(
+                base + chrono::Duration::seconds(120),
+                Kind::Text,
+                7,
+                "needle dup",
+                tmp.path(),
+            ))
+            .unwrap();
+
+        let hits = s.search("needle", 10, None).unwrap();
+        assert_eq!(hits.len(), 3, "search returns ALL matches (no dedup)");
+        // Result is ts DESC: [id_new, id_mid, id_old]
+        assert_eq!(hits[0].row.id, id_new);
+        assert_eq!(hits[0].duplicate_of, None, "first occurrence is canonical");
+        assert_eq!(hits[1].row.id, id_mid);
+        assert_eq!(hits[1].duplicate_of, Some(id_new));
+        assert_eq!(hits[2].row.id, id_old);
+        assert_eq!(hits[2].duplicate_of, Some(id_new));
+    }
+
+    #[test]
+    fn search_handles_empty_content_rows() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        // An image row with no OCR text yet (content = None).
+        let mut r = row(Utc::now(), Kind::Image, 1, "", tmp.path());
+        r.content = None;
+        s.insert(&r).unwrap();
+        // Searching for *anything* should not crash and should return
+        // no rows for unrelated terms.
+        let hits = s.search("anything", 10, None).unwrap();
+        assert!(hits.is_empty());
     }
 }
