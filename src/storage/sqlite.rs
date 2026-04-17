@@ -722,4 +722,93 @@ mod tests {
         let hits = s.search("anything", 10, None).unwrap();
         assert!(hits.is_empty());
     }
+
+    /// Real-world bench: insert N captures into a fresh DB, time the
+    /// inserts (which include the MD file append), then time several
+    /// representative searches. Reports MD file size at end. Run with:
+    ///
+    ///   cargo test --bin tl bench_storage_at_scale --release \
+    ///       -- --ignored --nocapture
+    #[test]
+    #[ignore = "perf benchmark — run with --ignored --nocapture"]
+    fn bench_storage_at_scale() {
+        use std::time::Instant;
+
+        let n: usize = std::env::var("BENCH_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000);
+        let tmp = TempDir::new().unwrap();
+        // ring_buffer_size > N so we measure full-corpus search, not trim.
+        let s = Storage::open(tmp.path().join("index.db"), n + 1).unwrap();
+
+        // Synthesize varied content: some shared phrases (so FTS5 has
+        // realistic term frequencies), some unique tokens.
+        let mut rows = Vec::with_capacity(n);
+        let base = Utc.with_ymd_and_hms(2026, 4, 17, 0, 0, 0).unwrap();
+        for i in 0..n {
+            let content = format!(
+                "panicked at index {i}: needle haystack stripe webhook \
+                 fn calculate_total items pricing {i:08x}",
+            );
+            rows.push(row(
+                base + chrono::Duration::seconds(i as i64),
+                Kind::Text,
+                (i % 251) as u8 + 1,
+                Box::leak(content.into_boxed_str()),
+                tmp.path(),
+            ));
+        }
+
+        let t0 = Instant::now();
+        for r in &rows {
+            s.insert(r).expect("insert");
+        }
+        let insert_total = t0.elapsed();
+        let per_insert_us = insert_total.as_micros() as f64 / n as f64;
+
+        let queries = ["needle", "panicked", "stripe webhook", "calculate_total"];
+        let mut search_results = Vec::new();
+        for q in queries {
+            let t = Instant::now();
+            let hits = s.search(q, 100, None).unwrap();
+            search_results.push((q, hits.len(), t.elapsed()));
+        }
+
+        let recent_t = Instant::now();
+        let recent = s.get_recent(20, None).unwrap();
+        let recent_dur = recent_t.elapsed();
+
+        let md_path = tmp.path().join("2026-04-17.md");
+        let md_size = std::fs::metadata(&md_path).map(|m| m.len()).unwrap_or(0);
+
+        eprintln!("\n--- textlog perf bench ---");
+        eprintln!("N captures           : {n}");
+        eprintln!(
+            "insert total         : {:.2}s  ({:.1} µs/row, {:.0} ops/sec)",
+            insert_total.as_secs_f64(),
+            per_insert_us,
+            n as f64 / insert_total.as_secs_f64(),
+        );
+        eprintln!(
+            "MD file              : {} bytes ({:.2} MB), {:.0} bytes/row",
+            md_size,
+            md_size as f64 / 1_048_576.0,
+            md_size as f64 / n as f64,
+        );
+        for (q, count, dur) in &search_results {
+            eprintln!(
+                "search {:<22} : {} hits in {:>8.2}µs",
+                format!("{q:?}"),
+                count,
+                dur.as_micros()
+            );
+        }
+        eprintln!(
+            "get_recent(20, None) : {} rows  in {:>8.2}µs",
+            recent.len(),
+            recent_dur.as_micros()
+        );
+        eprintln!("--------------------------\n");
+    }
 }
