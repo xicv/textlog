@@ -23,6 +23,9 @@ pub enum Error {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
+    #[error("Storage data error: {0}")]
+    Storage(String),
+
     #[error("MCP protocol error: {0}")]
     Mcp(String),
 
@@ -100,6 +103,12 @@ mod tests {
     fn launchctl_shows_detail() {
         let err = Error::Launchctl("bootstrap failed: EEXIST".to_string());
         assert!(err.to_string().contains("bootstrap failed"));
+    }
+
+    #[test]
+    fn storage_shows_detail() {
+        let err = Error::Storage("hex parse: bad length".to_string());
+        assert!(err.to_string().contains("hex parse"));
     }
 
     #[test]

@@ -1,1 +1,520 @@
+//! SQLite ring buffer + FTS5 query index over recent captures.
+//!
+//! The MD archive (see `storage::markdown`) is the durable log;
+//! SQLite is a bounded query index. `Storage::insert` writes to both,
+//! then trims SQLite to `ring_buffer_size` rows. The MD file is never
+//! trimmed.
+//!
+//! Threading: holds an `Arc<Mutex<Connection>>` so the type is `Send +
+//! Sync` and can be shared across the MCP server's async tasks via
+//! `tokio::task::spawn_blocking`.
 
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use chrono::{DateTime, Utc};
+use rusqlite::Connection;
+
+use crate::error::{Error, Result};
+use crate::storage::{markdown, CaptureRow, Kind};
+
+pub struct Storage {
+    conn: Arc<Mutex<Connection>>,
+    ring_buffer_size: usize,
+}
+
+impl Storage {
+    /// Open or create the SQLite file at `path`, applying the v2.0 schema.
+    pub fn open(path: impl AsRef<Path>, ring_buffer_size: usize) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        Self::with_connection(conn, ring_buffer_size)
+    }
+
+    /// Open an in-memory database — primarily for tests.
+    pub fn open_in_memory(ring_buffer_size: usize) -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        Self::with_connection(conn, ring_buffer_size)
+    }
+
+    fn with_connection(conn: Connection, ring_buffer_size: usize) -> Result<Self> {
+        init_schema(&conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            ring_buffer_size,
+        })
+    }
+
+    /// Insert a capture row, append to its daily MD file, and trim
+    /// SQLite to `ring_buffer_size` rows. Returns the new row id.
+    pub fn insert(&self, row: &CaptureRow) -> Result<i64> {
+        let id = {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO captures
+                    (ts, kind, sha256, size_bytes, content,
+                     ocr_confidence, source_app, source_url, md_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    row.ts.to_rfc3339(),
+                    row.kind.as_str(),
+                    super::hex_lower(&row.sha256),
+                    row.size_bytes as i64,
+                    row.content,
+                    row.ocr_confidence,
+                    row.source_app,
+                    row.source_url,
+                    row.md_path.to_string_lossy().into_owned(),
+                ],
+            )?;
+            let id = conn.last_insert_rowid();
+            trim_ring_buffer(&conn, self.ring_buffer_size)?;
+            id
+        };
+
+        markdown::append(&row.md_path, row)?;
+        Ok(id)
+    }
+
+    /// Most recent N captures, deduplicated by sha256 (newest of each
+    /// hash kept). Optional kind filter.
+    pub fn get_recent(&self, n: u32, kind: Option<Kind>) -> Result<Vec<CaptureRow>> {
+        let conn = self.lock()?;
+        let kind_str = kind.map(|k| k.as_str().to_string());
+
+        // SQLite parameter trick: NULL bound to a kind filter means "any".
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, kind, sha256, size_bytes, content,
+                    ocr_confidence, source_app, source_url, md_path
+             FROM captures
+             WHERE id IN (
+                 SELECT MAX(id) FROM captures
+                 WHERE (?1 IS NULL OR kind = ?1)
+                 GROUP BY sha256
+             )
+             ORDER BY ts DESC
+             LIMIT ?2",
+        )?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![kind_str, n as i64], row_from_sqlite)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // query_map yields Result<Result<CaptureRow>>; flatten the inner.
+        rows.into_iter().collect()
+    }
+
+    /// Most recent image capture, or None.
+    pub fn get_latest_image(&self) -> Result<Option<CaptureRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, kind, sha256, size_bytes, content,
+                    ocr_confidence, source_app, source_url, md_path
+             FROM captures
+             WHERE kind = 'image'
+             ORDER BY ts DESC
+             LIMIT 1",
+        )?;
+        let mut iter = stmt.query_map([], row_from_sqlite)?;
+        match iter.next() {
+            None => Ok(None),
+            Some(Ok(Ok(row))) => Ok(Some(row)),
+            Some(Ok(Err(e))) => Err(e),
+            Some(Err(e)) => Err(e.into()),
+        }
+    }
+
+    /// Delete every row whose `ts >= ts`. MD files are *not* touched
+    /// (per spec — user can delete those manually).
+    pub fn clear_since(&self, ts: DateTime<Utc>) -> Result<usize> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "DELETE FROM captures WHERE ts >= ?1",
+            rusqlite::params![ts.to_rfc3339()],
+        )?;
+        Ok(n)
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|e| Error::Storage(format!("connection mutex poisoned: {e}")))
+    }
+}
+
+fn init_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS captures (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts              TEXT    NOT NULL,
+            kind            TEXT    NOT NULL,
+            sha256          TEXT    NOT NULL,
+            size_bytes      INTEGER NOT NULL,
+            content         TEXT,
+            ocr_confidence  REAL,
+            source_app      TEXT,
+            source_url      TEXT,
+            md_path         TEXT
+         );
+         CREATE INDEX IF NOT EXISTS idx_captures_ts     ON captures(ts DESC);
+         CREATE INDEX IF NOT EXISTS idx_captures_sha256 ON captures(sha256);
+         CREATE INDEX IF NOT EXISTS idx_captures_kind   ON captures(kind);",
+    )?;
+    Ok(())
+}
+
+fn trim_ring_buffer(conn: &Connection, size: usize) -> Result<()> {
+    if size == 0 {
+        // 0 disables trimming entirely.
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM captures
+         WHERE id NOT IN (
+             SELECT id FROM captures ORDER BY id DESC LIMIT ?1
+         )",
+        rusqlite::params![size as i64],
+    )?;
+    Ok(())
+}
+
+/// Map a SQLite row → CaptureRow. Returns the inner Result so callers
+/// can flatten through `.collect::<Result<Vec<_>>>()`.
+#[allow(clippy::type_complexity)]
+fn row_from_sqlite(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CaptureRow>> {
+    let id: i64 = row.get(0)?;
+    let ts_str: String = row.get(1)?;
+    let kind_str: String = row.get(2)?;
+    let sha_hex: String = row.get(3)?;
+    let size_bytes: i64 = row.get(4)?;
+    let content: Option<String> = row.get(5)?;
+    let ocr_confidence: Option<f32> = row.get(6)?;
+    let source_app: Option<String> = row.get(7)?;
+    let source_url: Option<String> = row.get(8)?;
+    let md_path: String = row.get(9)?;
+
+    Ok(decode_row(
+        id,
+        ts_str,
+        kind_str,
+        sha_hex,
+        size_bytes,
+        content,
+        ocr_confidence,
+        source_app,
+        source_url,
+        md_path,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_row(
+    id: i64,
+    ts_str: String,
+    kind_str: String,
+    sha_hex: String,
+    size_bytes: i64,
+    content: Option<String>,
+    ocr_confidence: Option<f32>,
+    source_app: Option<String>,
+    source_url: Option<String>,
+    md_path: String,
+) -> Result<CaptureRow> {
+    let ts = DateTime::parse_from_rfc3339(&ts_str)
+        .map_err(|e| Error::Storage(format!("bad ts {ts_str:?}: {e}")))?
+        .with_timezone(&Utc);
+    let kind = match kind_str.as_str() {
+        "text" => Kind::Text,
+        "image" => Kind::Image,
+        "file" => Kind::File,
+        other => return Err(Error::Storage(format!("unknown kind {other:?}"))),
+    };
+    let sha256 = super::parse_hex(&sha_hex)?;
+    Ok(CaptureRow {
+        id,
+        ts,
+        kind,
+        sha256,
+        size_bytes: size_bytes as usize,
+        content,
+        ocr_confidence,
+        source_app,
+        source_url,
+        md_path: md_path.into(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn row(
+        ts: DateTime<Utc>,
+        kind: Kind,
+        sha: u8,
+        content: &str,
+        md_dir: &Path,
+    ) -> CaptureRow {
+        CaptureRow {
+            id: 0,
+            ts,
+            kind,
+            sha256: [sha; 32],
+            size_bytes: content.len(),
+            content: Some(content.to_string()),
+            ocr_confidence: if matches!(kind, Kind::Image) {
+                Some(0.9)
+            } else {
+                None
+            },
+            source_app: None,
+            source_url: None,
+            md_path: md_dir.join("2026-04-17.md"),
+        }
+    }
+
+    #[test]
+    fn open_in_memory_creates_schema() {
+        let s = Storage::open_in_memory(100).expect("open_in_memory");
+        // Should be able to query an empty table without error.
+        let recent = s.get_recent(10, None).expect("get_recent on empty db");
+        assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn open_creates_db_file_on_disk() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("index.db");
+        let _s = Storage::open(&path, 100).unwrap();
+        assert!(path.exists(), "db file should be created on first open");
+    }
+
+    #[test]
+    fn open_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("index.db");
+        {
+            let s = Storage::open(&path, 100).unwrap();
+            s.insert(&row(Utc::now(), Kind::Text, 1, "first", tmp.path()))
+                .unwrap();
+        }
+        // Reopen — must not blow up, must keep the row.
+        let s = Storage::open(&path, 100).unwrap();
+        let recent = s.get_recent(10, None).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].content.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn insert_returns_incrementing_row_ids() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let id1 = s.insert(&row(Utc::now(), Kind::Text, 1, "a", tmp.path())).unwrap();
+        let id2 = s.insert(&row(Utc::now(), Kind::Text, 2, "b", tmp.path())).unwrap();
+        assert!(id2 > id1, "id2 ({id2}) must be greater than id1 ({id1})");
+    }
+
+    #[test]
+    fn insert_writes_md_file() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let r = row(Utc::now(), Kind::Text, 1, "log line", tmp.path());
+        s.insert(&r).unwrap();
+        let body = std::fs::read_to_string(&r.md_path).unwrap();
+        assert!(body.contains("log line"));
+        assert!(body.contains("kind: text"));
+    }
+
+    #[test]
+    fn insert_appends_to_existing_md() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let now = Utc::now();
+        let r1 = row(now, Kind::Text, 1, "alpha", tmp.path());
+        let r2 = row(now, Kind::Text, 2, "bravo", tmp.path());
+        s.insert(&r1).unwrap();
+        s.insert(&r2).unwrap();
+        let body = std::fs::read_to_string(&r1.md_path).unwrap();
+        assert!(body.contains("alpha"));
+        assert!(body.contains("bravo"));
+    }
+
+    #[test]
+    fn ring_buffer_trims_to_size() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(2).unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 4, 17, 10, 0, 0).unwrap();
+        for i in 0..5 {
+            s.insert(&row(
+                base + chrono::Duration::seconds(i as i64),
+                Kind::Text,
+                i as u8 + 1,
+                &format!("entry {i}"),
+                tmp.path(),
+            ))
+            .unwrap();
+        }
+        let all = s.get_recent(100, None).unwrap();
+        assert_eq!(all.len(), 2, "ring buffer of size 2 keeps last 2");
+        assert_eq!(all[0].content.as_deref(), Some("entry 4"));
+        assert_eq!(all[1].content.as_deref(), Some("entry 3"));
+    }
+
+    #[test]
+    fn ring_buffer_size_zero_disables_trimming() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(0).unwrap();
+        for i in 0..3 {
+            s.insert(&row(
+                Utc::now() + chrono::Duration::seconds(i as i64),
+                Kind::Text,
+                i as u8 + 1,
+                &format!("e{i}"),
+                tmp.path(),
+            ))
+            .unwrap();
+        }
+        let all = s.get_recent(100, None).unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn get_recent_orders_by_ts_descending() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 4, 17, 10, 0, 0).unwrap();
+        s.insert(&row(base, Kind::Text, 1, "old", tmp.path())).unwrap();
+        s.insert(&row(base + chrono::Duration::seconds(2), Kind::Text, 2, "new", tmp.path()))
+            .unwrap();
+        s.insert(&row(base + chrono::Duration::seconds(1), Kind::Text, 3, "mid", tmp.path()))
+            .unwrap();
+        let r = s.get_recent(10, None).unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].content.as_deref(), Some("new"));
+        assert_eq!(r[1].content.as_deref(), Some("mid"));
+        assert_eq!(r[2].content.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn get_recent_caps_by_n() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        for i in 0..5 {
+            s.insert(&row(
+                Utc::now() + chrono::Duration::seconds(i as i64),
+                Kind::Text,
+                i as u8 + 1,
+                &format!("e{i}"),
+                tmp.path(),
+            ))
+            .unwrap();
+        }
+        let r = s.get_recent(2, None).unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn get_recent_filters_by_kind() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let now = Utc::now();
+        s.insert(&row(now, Kind::Text, 1, "t1", tmp.path())).unwrap();
+        s.insert(&row(now + chrono::Duration::seconds(1), Kind::Image, 2, "i1", tmp.path()))
+            .unwrap();
+        s.insert(&row(now + chrono::Duration::seconds(2), Kind::Text, 3, "t2", tmp.path()))
+            .unwrap();
+        let images = s.get_recent(10, Some(Kind::Image)).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].kind, Kind::Image);
+        assert_eq!(images[0].content.as_deref(), Some("i1"));
+    }
+
+    #[test]
+    fn get_recent_dedupes_by_sha256() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        // Three rows, same sha256 → one returned (the newest).
+        let now = Utc::now();
+        s.insert(&row(now, Kind::Text, 7, "first", tmp.path())).unwrap();
+        s.insert(&row(now + chrono::Duration::seconds(1), Kind::Text, 7, "second", tmp.path()))
+            .unwrap();
+        s.insert(&row(now + chrono::Duration::seconds(2), Kind::Text, 7, "third", tmp.path()))
+            .unwrap();
+        let r = s.get_recent(10, None).unwrap();
+        assert_eq!(r.len(), 1, "deduped by sha256");
+        // Newest (highest id) wins.
+        assert_eq!(r[0].content.as_deref(), Some("third"));
+    }
+
+    #[test]
+    fn get_latest_image_returns_most_recent_image() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let now = Utc::now();
+        s.insert(&row(now, Kind::Text, 1, "txt", tmp.path())).unwrap();
+        s.insert(&row(now + chrono::Duration::seconds(1), Kind::Image, 2, "old img", tmp.path()))
+            .unwrap();
+        s.insert(&row(now + chrono::Duration::seconds(2), Kind::Text, 3, "more txt", tmp.path()))
+            .unwrap();
+        s.insert(&row(now + chrono::Duration::seconds(3), Kind::Image, 4, "new img", tmp.path()))
+            .unwrap();
+        let img = s.get_latest_image().unwrap().expect("an image exists");
+        assert_eq!(img.content.as_deref(), Some("new img"));
+    }
+
+    #[test]
+    fn get_latest_image_returns_none_when_no_images() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        s.insert(&row(Utc::now(), Kind::Text, 1, "only text", tmp.path())).unwrap();
+        assert!(s.get_latest_image().unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_since_deletes_rows_at_or_after_ts() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 4, 17, 10, 0, 0).unwrap();
+        s.insert(&row(base, Kind::Text, 1, "before", tmp.path())).unwrap();
+        s.insert(&row(base + chrono::Duration::seconds(60), Kind::Text, 2, "boundary", tmp.path()))
+            .unwrap();
+        s.insert(&row(base + chrono::Duration::seconds(120), Kind::Text, 3, "after", tmp.path()))
+            .unwrap();
+
+        let cutoff = base + chrono::Duration::seconds(60);
+        let deleted = s.clear_since(cutoff).unwrap();
+        assert_eq!(deleted, 2, "boundary + after row deleted");
+
+        let rest = s.get_recent(10, None).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].content.as_deref(), Some("before"));
+    }
+
+    #[test]
+    fn round_trip_preserves_all_optional_fields() {
+        let tmp = TempDir::new().unwrap();
+        let s = Storage::open_in_memory(100).unwrap();
+        let mut r = row(
+            Utc.with_ymd_and_hms(2026, 4, 17, 12, 0, 0).unwrap(),
+            Kind::Image,
+            42,
+            "OCR text",
+            tmp.path(),
+        );
+        r.source_app = Some("Safari".into());
+        r.source_url = Some("https://example.com/x".into());
+        r.ocr_confidence = Some(0.87);
+        s.insert(&r).unwrap();
+
+        let got = s.get_recent(10, None).unwrap();
+        assert_eq!(got.len(), 1);
+        let g = &got[0];
+        assert_eq!(g.kind, Kind::Image);
+        assert_eq!(g.sha256, [42u8; 32]);
+        assert_eq!(g.source_app.as_deref(), Some("Safari"));
+        assert_eq!(g.source_url.as_deref(), Some("https://example.com/x"));
+        assert!((g.ocr_confidence.unwrap() - 0.87).abs() < 1e-5);
+        assert_eq!(g.md_path, r.md_path);
+    }
+}

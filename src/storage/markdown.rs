@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 
 use crate::error::Result;
-use crate::storage::CaptureRow;
+use crate::storage::{hex_lower, CaptureRow};
 
 /// Render a capture row into the v2.0 frontmatter+body Markdown block.
 /// Always ends with a trailing newline so consecutive appends produce a
@@ -80,14 +80,6 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
 
 #[cfg(test)]
 mod tests {

@@ -32,6 +32,47 @@ impl Kind {
     }
 }
 
+/// Lowercase 64-char hex of a 32-byte SHA-256 digest.
+pub(crate) fn hex_lower(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Parse a 64-char hex string back into 32 bytes. Accepts upper- or
+/// lowercase digits.
+pub(crate) fn parse_hex(s: &str) -> crate::error::Result<[u8; 32]> {
+    use crate::error::Error;
+    if s.len() != 64 {
+        return Err(Error::Storage(format!(
+            "sha256 hex must be 64 chars, got {}",
+            s.len()
+        )));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let hi = hex_nibble(s.as_bytes()[i * 2])?;
+        let lo = hex_nibble(s.as_bytes()[i * 2 + 1])?;
+        *byte = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(c: u8) -> crate::error::Result<u8> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(crate::error::Error::Storage(format!(
+            "non-hex char {:?} in sha256",
+            c as char
+        ))),
+    }
+}
+
 /// One row of the captures table — also the unit appended to the daily
 /// Markdown file. `id` is `0` until the row has been inserted into SQLite.
 #[derive(Debug, Clone)]
@@ -70,5 +111,47 @@ mod tests {
         assert_eq!(json, "\"image\"");
         let back: Kind = serde_json::from_str("\"file\"").unwrap();
         assert_eq!(back, Kind::File);
+    }
+
+    #[test]
+    fn hex_lower_is_64_chars_lowercase() {
+        let h = hex_lower(&[0xAB; 32]);
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(h, "ab".repeat(32));
+    }
+
+    #[test]
+    fn parse_hex_roundtrips() {
+        let original = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]
+            .into_iter()
+            .cycle()
+            .take(32)
+            .collect::<Vec<_>>();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&original);
+        let hex = hex_lower(&arr);
+        let back = parse_hex(&hex).unwrap();
+        assert_eq!(arr, back);
+    }
+
+    #[test]
+    fn parse_hex_accepts_uppercase() {
+        let upper = "AB".repeat(32);
+        let bytes = parse_hex(&upper).expect("uppercase hex should parse");
+        assert_eq!(bytes, [0xab; 32]);
+    }
+
+    #[test]
+    fn parse_hex_rejects_wrong_length() {
+        let err = parse_hex("deadbeef").unwrap_err();
+        assert!(format!("{err}").contains("64 chars"));
+    }
+
+    #[test]
+    fn parse_hex_rejects_non_hex_char() {
+        let bad = "g".to_string() + &"a".repeat(63);
+        let err = parse_hex(&bad).unwrap_err();
+        assert!(format!("{err}").contains("non-hex"));
     }
 }
