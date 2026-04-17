@@ -6,6 +6,12 @@ rust-version = "1.80"
 description = "macOS clipboard + OCR daemon exposed to Claude Code as an MCP server"
 authors = ["xicao"]
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/xicv/textlog"
+homepage = "https://github.com/xicv/textlog"
+documentation = "https://github.com/xicv/textlog#readme"
+keywords = ["mcp", "claude", "clipboard", "ocr", "macos"]
+categories = ["command-line-utilities", "os::macos-apis"]
 
 [[bin]]
 name = "tl"
