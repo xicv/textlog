@@ -20,12 +20,16 @@ use super::args::{Cli, Command, ConfigCmd, LogsCmd};
 use super::doctor;
 
 /// Top-level dispatch — async because `mcp` runs the rmcp server.
+///
+/// IMPORTANT: do NOT hold `std::io::stdout().lock()` across the whole
+/// dispatch. `tokio::io::stdout()` (used by the rmcp stdio transport in
+/// `run_mcp`) writes to the global stdout from a `spawn_blocking`
+/// worker thread, which then needs to acquire the same `ReentrantLock`
+/// — different thread, lock held by `dispatch` ⇒ deadlock during the
+/// MCP `initialize` response. Each command locks stdout on its own.
 pub async fn dispatch(cli: Cli) -> Result<()> {
-    let mut stdout = std::io::stdout().lock();
-
-    // `tl -v` / `--version` short-circuits before we touch the config
-    // file (which would otherwise initialise it on first run).
     if cli.version_flag {
+        let mut stdout = std::io::stdout().lock();
         return print_version(&mut stdout);
     }
 
@@ -38,23 +42,22 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
 
     match command {
         Command::Mcp => run_mcp(&cfg).await,
-        Command::Version => print_version(&mut stdout),
-        Command::Config { cmd } => run_config(cmd, &cfg, &cfg_path, &mut stdout),
-        Command::Logs { cmd } => run_logs(cmd, &cfg, &mut stdout),
-        Command::Doctor => doctor::run_all(&cfg, &cfg_path, &mut stdout),
-        Command::Install => run_install(&cfg, &mut stdout),
-        Command::Uninstall => run_uninstall(&mut stdout),
+        Command::Version => print_version(&mut std::io::stdout().lock()),
+        Command::Config { cmd } => run_config(cmd, &cfg, &cfg_path, &mut std::io::stdout().lock()),
+        Command::Logs { cmd } => run_logs(cmd, &cfg, &mut std::io::stdout().lock()),
+        Command::Doctor => doctor::run_all(&cfg, &cfg_path, &mut std::io::stdout().lock()),
+        Command::Install => run_install(&cfg, &mut std::io::stdout().lock()),
+        Command::Uninstall => run_uninstall(&mut std::io::stdout().lock()),
         Command::Start { foreground } => {
             if foreground {
-                drop(stdout);
                 run_start_foreground(&cfg).await
             } else {
-                run_start(&mut stdout)
+                run_start(&mut std::io::stdout().lock())
             }
         }
-        Command::Stop => run_stop(&mut stdout),
-        Command::Status => run_status(&mut stdout),
-        Command::Update => run_update(&mut stdout),
+        Command::Stop => run_stop(&mut std::io::stdout().lock()),
+        Command::Status => run_status(&mut std::io::stdout().lock()),
+        Command::Update => run_update(&mut std::io::stdout().lock()),
     }
 }
 
