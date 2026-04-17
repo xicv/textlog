@@ -13,15 +13,21 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "tl",
     about = "macOS clipboard + OCR daemon, MCP server for Claude Code",
-    version
+    // `disable_version_flag` lets us register both -v and --version
+    // (clap's default is uppercase -V; users expect lowercase -v).
+    disable_version_flag = true,
 )]
 pub struct Cli {
     /// Override config directory (defaults to `$TEXTLOG_CONFIG_DIR` or `~/textlog/`).
     #[arg(long, global = true, env = "TEXTLOG_CONFIG_DIR")]
     pub config_dir: Option<PathBuf>,
 
+    /// Print version and exit (also: `tl version`).
+    #[arg(short = 'v', short_alias = 'V', long = "version", global = true)]
+    pub version_flag: bool,
+
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -60,6 +66,10 @@ pub enum Command {
     Stop,
     /// Show the daemon status.
     Status,
+
+    /// Update textlog to the latest version on crates.io
+    /// (shells out to `cargo install textlog --force`).
+    Update,
 }
 
 #[derive(Debug, Subcommand)]
@@ -104,20 +114,46 @@ mod tests {
     #[test]
     fn parses_mcp_subcommand() {
         let cli = Cli::try_parse_argv(&["tl", "mcp"]).unwrap();
-        assert!(matches!(cli.command, Command::Mcp));
+        assert!(matches!(cli.command, Some(Command::Mcp)));
     }
 
     #[test]
     fn parses_version_subcommand() {
         let cli = Cli::try_parse_argv(&["tl", "version"]).unwrap();
-        assert!(matches!(cli.command, Command::Version));
+        assert!(matches!(cli.command, Some(Command::Version)));
+    }
+
+    #[test]
+    fn version_short_flag_lowercase_works() {
+        let cli = Cli::try_parse_argv(&["tl", "-v"]).unwrap();
+        assert!(cli.version_flag);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn version_short_flag_uppercase_alias_works() {
+        // -V is the conventional clap short, kept as alias.
+        let cli = Cli::try_parse_argv(&["tl", "-V"]).unwrap();
+        assert!(cli.version_flag);
+    }
+
+    #[test]
+    fn version_long_flag_works() {
+        let cli = Cli::try_parse_argv(&["tl", "--version"]).unwrap();
+        assert!(cli.version_flag);
+    }
+
+    #[test]
+    fn parses_update_subcommand() {
+        let cli = Cli::try_parse_argv(&["tl", "update"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Update)));
     }
 
     #[test]
     fn parses_config_show() {
         let cli = Cli::try_parse_argv(&["tl", "config", "show"]).unwrap();
         match cli.command {
-            Command::Config { cmd: ConfigCmd::Show } => {}
+            Some(Command::Config { cmd: ConfigCmd::Show }) => {}
             other => panic!("expected Config Show, got {other:?}"),
         }
     }
@@ -126,7 +162,7 @@ mod tests {
     fn parses_config_reset() {
         let cli = Cli::try_parse_argv(&["tl", "config", "reset"]).unwrap();
         match cli.command {
-            Command::Config { cmd: ConfigCmd::Reset } => {}
+            Some(Command::Config { cmd: ConfigCmd::Reset }) => {}
             other => panic!("expected Config Reset, got {other:?}"),
         }
     }
@@ -135,9 +171,9 @@ mod tests {
     fn parses_logs_search_with_default_limit() {
         let cli = Cli::try_parse_argv(&["tl", "logs", "search", "panic"]).unwrap();
         match cli.command {
-            Command::Logs {
+            Some(Command::Logs {
                 cmd: LogsCmd::Search { query, limit },
-            } => {
+            }) => {
                 assert_eq!(query, "panic");
                 assert_eq!(limit, 20);
             }
@@ -149,9 +185,9 @@ mod tests {
     fn parses_logs_search_with_custom_limit() {
         let cli = Cli::try_parse_argv(&["tl", "logs", "search", "x", "--limit", "5"]).unwrap();
         match cli.command {
-            Command::Logs {
+            Some(Command::Logs {
                 cmd: LogsCmd::Search { query, limit },
-            } => {
+            }) => {
                 assert_eq!(query, "x");
                 assert_eq!(limit, 5);
             }
@@ -170,16 +206,18 @@ mod tests {
     fn parses_start_foreground() {
         let cli = Cli::try_parse_argv(&["tl", "start", "--foreground"]).unwrap();
         match cli.command {
-            Command::Start { foreground } => assert!(foreground),
+            Some(Command::Start { foreground }) => assert!(foreground),
             other => panic!("expected Start, got {other:?}"),
         }
     }
 
     #[test]
-    fn missing_subcommand_errors() {
-        // clap may report this as either `MissingSubcommand` or
-        // `DisplayHelpOnMissingArgumentOrSubcommand` depending on the
-        // version — accept anything that prevents a successful parse.
-        assert!(Cli::try_parse_argv(&["tl"]).is_err());
+    fn bare_tl_parses_with_neither_command_nor_version() {
+        // `tl` alone is now a successful parse (command = None,
+        // version_flag = false). The dispatch layer surfaces the
+        // missing-subcommand error to the user.
+        let cli = Cli::try_parse_argv(&["tl"]).unwrap();
+        assert!(cli.command.is_none());
+        assert!(!cli.version_flag);
     }
 }

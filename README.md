@@ -323,7 +323,8 @@ Two long-running tasks joined via `tokio::select!`:
 
 ```
 tl mcp                          Run MCP stdio server (Claude Code spawns this)
-tl version                      Print version
+tl version | -v | --version     Print version (subcommand or short flag)
+tl update                       Self-update via `cargo install textlog --force`
 tl config show                  Print effective config as TOML
 tl config path                  Print config file path
 tl config reset                 Overwrite config with v2.0 defaults

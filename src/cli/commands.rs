@@ -21,11 +21,22 @@ use super::doctor;
 
 /// Top-level dispatch — async because `mcp` runs the rmcp server.
 pub async fn dispatch(cli: Cli) -> Result<()> {
-    let cfg_path = resolve_config_path(cli.config_dir.as_deref())?;
-    let cfg = crate::config::load_or_init(&cfg_path)?;
     let mut stdout = std::io::stdout().lock();
 
-    match cli.command {
+    // `tl -v` / `--version` short-circuits before we touch the config
+    // file (which would otherwise initialise it on first run).
+    if cli.version_flag {
+        return print_version(&mut stdout);
+    }
+
+    let command = cli
+        .command
+        .ok_or_else(|| Error::Doctor("no subcommand given (try `tl --help`)".into()))?;
+
+    let cfg_path = resolve_config_path(cli.config_dir.as_deref())?;
+    let cfg = crate::config::load_or_init(&cfg_path)?;
+
+    match command {
         Command::Mcp => run_mcp(&cfg).await,
         Command::Version => print_version(&mut stdout),
         Command::Config { cmd } => run_config(cmd, &cfg, &cfg_path, &mut stdout),
@@ -43,7 +54,24 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Stop => run_stop(&mut stdout),
         Command::Status => run_status(&mut stdout),
+        Command::Update => run_update(&mut stdout),
     }
+}
+
+fn run_update<W: Write>(out: &mut W) -> Result<()> {
+    writeln!(out, "running: cargo install textlog --force")?;
+    let status = std::process::Command::new("cargo")
+        .args(["install", "textlog", "--force"])
+        .status()
+        .map_err(|e| Error::Launchctl(format!("could not spawn cargo: {e}")))?;
+    if !status.success() {
+        return Err(Error::Launchctl(format!(
+            "cargo install exited with {status}"
+        )));
+    }
+    writeln!(out, "tl updated. Restart the daemon to pick up the new binary:")?;
+    writeln!(out, "  tl uninstall && tl install")?;
+    Ok(())
 }
 
 fn run_install<W: Write>(cfg: &Config, out: &mut W) -> Result<()> {
