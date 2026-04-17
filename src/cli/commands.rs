@@ -17,6 +17,7 @@ use crate::service::{self, ServiceStatus, SystemLaunchctl};
 use crate::storage::{expand_tilde, hex_lower, CaptureRow, Kind, Storage};
 
 use super::args::{Cli, Command, ConfigCmd, LogsCmd};
+use super::doctor;
 
 /// Top-level dispatch — async because `mcp` runs the rmcp server.
 pub async fn dispatch(cli: Cli) -> Result<()> {
@@ -29,7 +30,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Version => print_version(&mut stdout),
         Command::Config { cmd } => run_config(cmd, &cfg, &cfg_path, &mut stdout),
         Command::Logs { cmd } => run_logs(cmd, &cfg, &mut stdout),
-        Command::Doctor => print_unimplemented("doctor", &mut stdout),
+        Command::Doctor => doctor::run_all(&cfg, &cfg_path, &mut stdout),
         Command::Install => run_install(&cfg, &mut stdout),
         Command::Uninstall => run_uninstall(&mut stdout),
         Command::Start { foreground } => {

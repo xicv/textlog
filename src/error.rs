@@ -35,6 +35,9 @@ pub enum Error {
     #[error("launchctl operation failed: {0}")]
     Launchctl(String),
 
+    #[error("tl doctor: {0}")]
+    Doctor(String),
+
     #[error("Privacy filter compilation failed: {0}")]
     FilterCompile(#[from] regex::Error),
 }
