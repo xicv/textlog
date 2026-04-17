@@ -54,9 +54,21 @@ sha2 = "0.11"
 
 # macOS FFI
 objc2 = "0.6"
-objc2-foundation = "0.3"
+objc2-foundation = { version = "0.3", features = [
+    "NSData",
+    "NSArray",
+    "NSDictionary",
+    "NSString",
+    "NSError",
+    "NSObject",
+] }
 objc2-app-kit = "0.3"
-objc2-vision = "0.3"
+objc2-vision = { version = "0.3", features = [
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+    "VNObservation",
+] }
 
 # macOS notifications
 notify-rust = "4"

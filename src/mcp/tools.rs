@@ -10,7 +10,9 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ErrorCode, ErrorData, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
+use crate::config::schema::OcrConfig;
 use crate::error::Error;
+use crate::ocr;
 use crate::storage::{hex_lower, CaptureRow, Kind, SearchHit, Storage};
 
 use super::schema::{
@@ -23,14 +25,20 @@ use super::schema::{
 #[derive(Clone)]
 pub struct McpServer {
     storage: Arc<Storage>,
+    ocr_cfg: Arc<OcrConfig>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl McpServer {
     pub fn new(storage: Arc<Storage>) -> Self {
+        Self::with_ocr(storage, OcrConfig::default())
+    }
+
+    pub fn with_ocr(storage: Arc<Storage>, ocr_cfg: OcrConfig) -> Self {
         Self {
             storage,
+            ocr_cfg: Arc::new(ocr_cfg),
             tool_router: Self::tool_router(),
         }
     }
@@ -135,21 +143,35 @@ impl McpServer {
     }
 
     /// Ad-hoc OCR of an image file outside the clipboard stream.
-    /// Stubbed until Phase 6 Task 7a (OCR module) lands.
     #[tool(
         name = "textlog__ocr_image",
-        description = "Run Apple Vision OCR on an image file at the given absolute path. \
-                       Currently unimplemented — returns an error until the OCR module ships."
+        description = "Run Apple Vision OCR on the image file at `path` (absolute path). \
+                       Returns the recognized text, mean block confidence, and block count."
     )]
     pub async fn ocr_image(
         &self,
-        Parameters(_args): Parameters<OcrImageArgs>,
+        Parameters(args): Parameters<OcrImageArgs>,
     ) -> Result<Json<OcrResult>, ErrorData> {
-        Err(ErrorData::new(
-            ErrorCode::INTERNAL_ERROR,
-            "textlog__ocr_image is not yet implemented (Phase 6 Task 7a pending)",
-            None,
-        ))
+        let cfg = Arc::clone(&self.ocr_cfg);
+        let path = args.path;
+        let res = tokio::task::spawn_blocking(move || -> crate::error::Result<_> {
+            let bytes = std::fs::read(&path)?;
+            ocr::ocr_image(&bytes, &cfg)
+        })
+        .await
+        .map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("ocr task join error: {e}"),
+                None,
+            )
+        })?
+        .map_err(storage_error_to_data)?;
+        Ok(Json(OcrResult {
+            text: res.text,
+            confidence: res.confidence,
+            block_count: res.block_count,
+        }))
     }
 }
 
@@ -493,16 +515,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ocr_image_returns_unimplemented_error() {
-        let (server, _tmp) = server_with_storage();
+    async fn ocr_image_returns_io_error_for_missing_path() {
+        let (server, tmp) = server_with_storage();
+        let missing = tmp.path().join("does-not-exist.png");
         let err = server
             .ocr_image(Parameters(OcrImageArgs {
-                path: "/tmp/x.png".into(),
+                path: missing.to_string_lossy().into_owned(),
             }))
             .await
             .err()
             .expect("expected an error");
-        assert!(err.message.contains("not yet implemented"));
+        // std::fs::read on a missing file → Error::Io → INTERNAL_ERROR.
+        let msg = format!("{}", err.message);
+        assert!(msg.contains("I/O") || msg.contains("No such"), "got: {msg}");
     }
 
     #[test]
