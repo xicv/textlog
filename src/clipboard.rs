@@ -135,10 +135,80 @@ mod imp {
     }
 }
 
-// Re-export for the pipeline (Phase 11) — currently flagged unused
-// because no caller exists yet outside of this crate's tests.
+// `write_text` is reached only via SystemClipboardWriter (below); the
+// monitor and consumer use current_change_count + poll_once directly.
 #[allow(unused_imports)]
 pub use imp::{current_change_count, poll_once, write_text};
+
+// ---- ClipboardWriter trait ------------------------------------------
+//
+// The pipeline writes the daily-MD path back to the clipboard when
+// `notifications.copy_log_path_on_complete = true`. We hide this
+// behind a trait so pipeline tests inject a counter instead of
+// actually touching NSPasteboard.
+
+use std::sync::Arc;
+
+pub trait ClipboardWriter: Send + Sync {
+    /// Write `s` to the clipboard; return the resulting `changeCount`.
+    fn write_text(&self, s: &str) -> Result<i64>;
+}
+
+/// Real writer wrapping `clipboard::write_text`. Pipe in an
+/// `Arc<AtomicI64>` shared with the monitor's self-write-skip token.
+pub struct SystemClipboardWriter {
+    pub self_write_token: Arc<AtomicI64>,
+}
+
+impl SystemClipboardWriter {
+    pub fn new(self_write_token: Arc<AtomicI64>) -> Self {
+        Self { self_write_token }
+    }
+}
+
+impl ClipboardWriter for SystemClipboardWriter {
+    fn write_text(&self, s: &str) -> Result<i64> {
+        imp::write_text(s, &self.self_write_token)
+    }
+}
+
+/// No-op writer for environments where we don't want to touch the
+/// clipboard (tests, non-macOS dev builds).
+pub struct NullClipboardWriter;
+
+impl ClipboardWriter for NullClipboardWriter {
+    fn write_text(&self, _s: &str) -> Result<i64> {
+        Ok(0)
+    }
+}
+
+/// Test double that records every call and returns monotonically
+/// increasing fake changeCounts.
+#[derive(Debug, Default)]
+pub struct CountingClipboardWriter {
+    pub calls: std::sync::Mutex<Vec<String>>,
+    pub next_change_count: std::sync::atomic::AtomicI64,
+}
+
+impl CountingClipboardWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl ClipboardWriter for CountingClipboardWriter {
+    fn write_text(&self, s: &str) -> Result<i64> {
+        self.calls.lock().unwrap().push(s.to_string());
+        Ok(self
+            .next_change_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1)
+    }
+}
 
 #[cfg(test)]
 mod tests {

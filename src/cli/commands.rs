@@ -6,8 +6,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::sync::atomic::AtomicI64;
+
+use crate::clipboard::SystemClipboardWriter;
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::notifier::SystemNotifier;
+use crate::pipeline::Pipeline;
 use crate::storage::{expand_tilde, hex_lower, CaptureRow, Kind, Storage};
 
 use super::args::{Cli, Command, ConfigCmd, LogsCmd};
@@ -26,10 +31,41 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Doctor => print_unimplemented("doctor", &mut stdout),
         Command::Install => print_unimplemented("install", &mut stdout),
         Command::Uninstall => print_unimplemented("uninstall", &mut stdout),
-        Command::Start { foreground: _ } => print_unimplemented("start", &mut stdout),
+        Command::Start { foreground } => {
+            if foreground {
+                drop(stdout);
+                run_start_foreground(&cfg).await
+            } else {
+                print_unimplemented("start", &mut stdout)
+            }
+        }
         Command::Stop => print_unimplemented("stop", &mut stdout),
         Command::Status => print_unimplemented("status", &mut stdout),
     }
+}
+
+async fn run_start_foreground(cfg: &Config) -> Result<()> {
+    use crate::clipboard;
+
+    let storage = Arc::new(open_storage(cfg)?);
+    let notifier = Arc::new(SystemNotifier::new(cfg.notifications.clone()));
+    let token = Arc::new(AtomicI64::new(clipboard::current_change_count()));
+    let writer = Arc::new(SystemClipboardWriter::new(Arc::clone(&token)));
+
+    let pipeline = Arc::new(Pipeline::new(
+        cfg.clone(),
+        storage,
+        notifier,
+        writer,
+        token,
+    )?);
+
+    eprintln!(
+        "textlog: starting foreground pipeline (poll {}ms, log {}). Ctrl-C to stop.",
+        cfg.monitoring.poll_interval_ms,
+        expand_tilde(&cfg.storage.log_dir).display(),
+    );
+    pipeline.run().await
 }
 
 fn resolve_config_path(override_dir: Option<&std::path::Path>) -> Result<PathBuf> {
