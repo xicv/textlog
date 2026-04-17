@@ -6,9 +6,33 @@
 
 `textlog` runs quietly in the background, watches your clipboard and
 screenshots, OCRs images with the same engine the macOS system uses, and
-makes everything searchable by Claude Code through six `textlog__*` MCP tools.
-Nothing leaves your machine. There is no LLM inside `textlog` — Claude Code
-is the LLM, `textlog` is its eyes on your clipboard.
+makes everything searchable by Claude Code through six `textlog__*` MCP
+tools. Nothing leaves your machine. There is no LLM inside `textlog` —
+Claude Code is the LLM, `textlog` is its eyes on your clipboard.
+
+[![crates.io](https://img.shields.io/crates/v/textlog.svg)](https://crates.io/crates/textlog)
+[![docs.rs](https://docs.rs/textlog/badge.svg)](https://docs.rs/textlog)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+---
+
+## Table of contents
+
+- [Why this exists](#why-this-exists)
+- [Features](#features)
+- [Quickstart](#quickstart)
+- [Real scenarios](#real-scenarios)
+- [Architecture](#architecture)
+- [CLI reference](#cli-reference)
+- [MCP tools](#mcp-tools)
+- [Configuration](#configuration)
+- [Tuning recipes](#tuning-recipes)
+- [Privacy](#privacy)
+- [macOS permissions](#macos-permissions)
+- [FAQ / troubleshooting](#faq--troubleshooting)
+- [Comparison with alternatives](#comparison-with-alternatives)
+- [Development](#development)
+- [License](#license)
 
 ---
 
@@ -45,7 +69,7 @@ UI. The MCP server is the entire user-facing surface.
   Registers in one command: `claude mcp add textlog -- tl mcp`.
 - **On-device OCR** via `VNRecognizeTextRequest` (Apple Vision). No cloud
   call, no API key, no rate limit. Honours `recognition_level`
-  ("accurate" | "fast") and a configurable language list.
+  (`"accurate"` | `"fast"`) and a configurable language list.
 - **SQLite + FTS5 ring buffer.** Bounded full-text index (default 1000
   captures), automatically trimmed. The daily Markdown archive is
   **never** trimmed — the SQL index is for query speed; the MD files
@@ -54,6 +78,10 @@ UI. The MCP server is the entire user-facing surface.
   duplicates by content hash; `search` returns every match but marks
   later occurrences with `duplicate_of`, so Claude sees each unique
   snippet exactly once per call.
+- **`md_path` on every result.** Every capture row in every MCP response
+  carries the absolute path of the daily Markdown file it was mirrored
+  into, so Claude can `Read` the whole day's context as a single file
+  attachment without any clipboard round-trip.
 - **Privacy filter.** A `RegexSet` is compiled once at startup from
   `monitoring.ignore_patterns`. Defaults catch OpenAI-style API keys,
   `*_KEY=` env-var assignments, 16-digit credit-card numbers, and
@@ -70,13 +98,23 @@ UI. The MCP server is the entire user-facing surface.
   permissions, LaunchAgent state, MCP registration, and a live Vision
   smoke test, then exits non-zero if anything is broken.
 
+### What's new in v0.1.1
+
+- `md_path` is now included on every `CaptureSummary`. This makes
+  scenario 10 ("daily-archive paste trick") work without
+  `notifications.copy_log_path_on_complete` — recommended for users
+  whose clipboard manager (Raycast / Maccy / Paste / Alfred) cascades
+  on the path-back-to-clipboard write.
+
 ---
 
 ## Quickstart
 
 ```bash
 # Build and install (requires Rust 1.80+ and macOS).
-cargo install --path .
+cargo install textlog                   # from crates.io
+# or
+cargo install --path .                  # from a local clone
 
 # First-run health check — should print 4 PASS, 4 WARN, 0 FAIL.
 tl doctor
@@ -93,6 +131,10 @@ claude mcp list
 
 That's it. Open any Claude Code session and ask "what's in my recent
 clipboard?" — Claude calls `textlog__get_recent` and reads the answer.
+
+If you'd rather run only when you ask, skip `tl install` and run
+`tl start --foreground` in a terminal tab — the daemon prints to
+stdout and stops on Ctrl-C.
 
 ---
 
@@ -160,16 +202,49 @@ Three days later, after a reboot:
 
 `textlog__search { query: "webhook", since: "2026-04-14T00:00:00Z" }`.
 
-### 10. Daily-archive paste trick
-Default-on. Every capture ends with the daily-MD file path on your
-clipboard.
-- Copy something interesting
-- Hit `Cmd+V` in Claude — you get the *path* to that day's file
-- Tell Claude *"read that file"* — Claude has the entire day's
-  context as a single attachment
+### 10. Daily-archive paste trick (v0.1.1+ — no clipboard side-effect)
+Every capture row in every MCP response now carries `md_path`. So:
+> *"Read the daily clipboard log and summarise my morning."*
 
-The self-write skip makes this loop safe: the daemon ignores its own
-write of the path, so you don't get a recursive capture.
+Claude calls `textlog__get_recent { n: 1 }`, sees
+`md_path: "/Users/you/textlog/logs/2026-04-17.md"` in the response,
+then calls its built-in `Read` tool on that path. Claude receives the
+entire day's chronological transcript as a single attachment.
+
+In v0.1.0 the same workflow needed `notifications.copy_log_path_on_complete`,
+which copied the path to the clipboard after each capture and could
+cascade with some clipboard managers. v0.1.1 makes that side-effect
+optional — you can turn it off and Claude still finds the file.
+
+### 11. Code review prep
+Reviewing a PR? Click through every changed file in your IDE, copy the
+unified diff for each, then:
+> *"For each clipboard entry from the last 10 minutes that looks like a
+> diff, list the function-level changes."*
+
+### 12. Slack/Linear ticket triage
+Copy the full ticket body from Linear, copy the relevant log line from
+your terminal, then:
+> *"Cross-reference my last two clipboard entries and tell me whether
+> the log proves the bug from the ticket."*
+
+### 13. Comparing two API responses
+Copy yesterday's response, copy today's response, then:
+> *"What changed between my last two clipboard entries (both JSON)?"*
+
+`textlog__get_recent { n: 2 }` → Claude diffs two JSON blobs without
+you opening a diff tool.
+
+### 14. "Save this for later" without manual notes
+You're in the middle of fixing bug A and notice symptom B. Cmd+C the
+relevant piece of evidence for B and keep working on A. Tomorrow:
+> *"Find clipboard entries from yesterday that look like error messages
+> I haven't followed up on."*
+
+### 15. AI coding pair-prog feedback loop
+Claude writes a function. You copy the test failure. Claude reads
+`textlog__get_recent`, sees its own previously-suggested code in
+context with the new failure, iterates without you re-pasting.
 
 ---
 
@@ -205,8 +280,8 @@ write of the path, so you don't get a recursive capture.
 |        ^                          |              |
 |        |                          v              |
 |        +----------- notifier::notify_complete    |
-|                     (+ clipboard::write_text     |
-|                      for log-path copy-back)     |
+|                     (+ optional clipboard write- |
+|                      back of the daily MD path)  |
 +--------------------------------------------------+
 ```
 
@@ -219,6 +294,28 @@ Two long-running tasks joined via `tokio::select!`:
 2. **Consumer** — drains the channel, runs filter → OCR → SHA-256 →
    `Storage::insert` → notifier, all SQLite work `spawn_blocking`'d so
    concurrent MCP queries are never blocked by a slow disk.
+
+### Why these specific choices
+
+- **Polling, not event-driven.** macOS `NSPasteboard` has no public
+  notification API for change events. The 250 ms poll interval is
+  perceptually instant and costs <1% CPU at idle (`changeCount` is a
+  cheap getter — only a content read happens when it actually advances).
+- **SQLite + FTS5, not a fancier search engine.** FTS5 is built into
+  SQLite, supports `MATCH 'foo'` queries with prefix wildcards, and
+  ships zero extra binaries. Latency for a single-keyword search over
+  10k rows is sub-millisecond on Apple Silicon.
+- **Ring buffer + permanent MD archive.** The bounded SQL index is
+  what makes `tl logs search` fast forever; the MD archive is what
+  makes "what did I copy three weeks ago" still answerable. Neither
+  alone is enough.
+- **Apple Vision, not Tesseract or a cloud OCR.** Vision ships with
+  macOS, requires no setup, supports 30+ languages, and runs on the
+  Neural Engine when available. A typical screenshot OCRs in <100 ms
+  with `recognition_level = "accurate"`.
+- **rmcp 1.4 stdio.** Stdio JSON-RPC is the only MCP transport Claude
+  Code's `claude mcp add` supports out of the box. No HTTP server, no
+  port collisions.
 
 ---
 
@@ -254,14 +351,17 @@ Global flag: `--config-dir <PATH>` (env: `TEXTLOG_CONFIG_DIR`) overrides
 
 | Tool | Args | Returns | Purpose |
 |---|---|---|---|
-| `textlog__get_recent` | `n` (default 5), `kind?` (`text`\|`image`\|`any`) | `{ captures: [...] }` | Latest N captures, deduped by sha256 |
-| `textlog__list_today` | `kind?` | `{ captures: [...] }` | Everything from today (UTC) |
+| `textlog__get_recent` | `n` (default 5), `kind?` (`text`\|`image`\|`any`) | `{ captures: [{ id, ts, kind, sha256, size_bytes, text, md_path, source_app?, source_url?, ocr_confidence? }] }` | Latest N captures, deduped by sha256 |
+| `textlog__list_today` | `kind?` | same shape as `get_recent` | Everything from today (UTC) |
 | `textlog__search` | `query`, `limit` (default 20), `since?` ISO 8601 | `{ hits: [{ capture, duplicate_of? }] }` | FTS5 search; later occurrences marked |
 | `textlog__ocr_latest` | none | `{ text, confidence, captured_at }` | Cached OCR text from the last image |
 | `textlog__ocr_image` | `path` (absolute) | `{ text, confidence, block_count }` | Ad-hoc OCR of any file |
 | `textlog__clear_since` | `ts` ISO 8601 | `{ deleted_count }` | Privacy cut-off (SQLite only; MD untouched) |
 
 All input/output schemas are published via MCP `tools/list`.
+`md_path` was added in v0.1.1 — it's the absolute path of the daily
+Markdown file the row was mirrored into, so Claude can `Read` the
+entire day's context without any clipboard round-trip.
 
 ---
 
@@ -281,16 +381,81 @@ Keys you'll most likely want to touch:
 | key | default | why touch it |
 |---|---|---|
 | `monitoring.poll_interval_ms` | `250` | Lower = snappier; higher = less CPU |
-| `monitoring.min_length` | `10` | Drop tiny copies (tab-switching noise) |
+| `monitoring.min_length` | `10` | Drop tiny copies (tab-switching noise). Lower to 1 if you want every clipboard transition recorded |
 | `monitoring.ignore_patterns` | API keys, CC numbers, passwords | Add your own regexes — anything matched is silently dropped |
-| `notifications.copy_log_path_on_complete` | `true` | Path-back-to-clipboard trick (scenario 10) |
+| `notifications.copy_log_path_on_complete` | `true` | If your clipboard manager cascades, set `false`. Claude still finds the path via `md_path` in MCP responses (v0.1.1+) |
+| `notifications.on_capture` | `false` | A toast for every clipboard event — usually too noisy |
 | `storage.ring_buffer_size` | `1000` | SQLite cap; MD archive is never trimmed |
 | `storage.log_dir` | `~/textlog/logs` | Where daily MD files live |
 | `ocr.recognition_level` | `"accurate"` | `"fast"` if Vision is too slow on your hardware |
 | `ocr.languages` | `["en-US"]` | Add more — Vision's polyglot is excellent |
+| `ocr.min_confidence` | `0.4` | Lower to keep blurrier OCR text; higher to drop low-confidence results |
 
 After editing: `tl uninstall && tl install` so the LaunchAgent re-reads
-the (cached) program args.
+the (cached) program args. (For `tl start --foreground`, just Ctrl-C
+and re-run.)
+
+---
+
+## Tuning recipes
+
+### Minimal-noise mode
+For users who only want substantive captures and no clipboard side-effects.
+
+```toml
+[monitoring]
+min_length = 50                     # ignore tab-switch noise
+
+[notifications]
+enabled = false                     # no toasts at all
+copy_log_path_on_complete = false   # no clipboard write-back
+```
+
+### Maximum-recall mode
+For users who want every clipboard transition recorded, even single chars.
+
+```toml
+[monitoring]
+min_length = 1
+poll_interval_ms = 100              # 4× faster polling
+
+[storage]
+ring_buffer_size = 10000            # ~10× the default; SQLite handles this fine
+```
+
+### Multilingual capture
+Vision supports 30+ languages. List them in priority order — earlier
+languages bias the recogniser when text is ambiguous.
+
+```toml
+[ocr]
+languages = ["en-US", "ja-JP", "zh-Hans", "fr-FR", "de-DE"]
+recognition_level = "accurate"
+```
+
+### Strict privacy
+Goes beyond the defaults — drops anything that looks remotely like a
+secret or a finance number.
+
+```toml
+[monitoring]
+ignore_patterns = [
+    "^sk-[A-Za-z0-9]{20,}",
+    "^\\w+_KEY\\s*=",
+    "^\\w+_TOKEN\\s*=",
+    "^\\w+_SECRET\\s*=",
+    "Bearer\\s+[A-Za-z0-9._-]{20,}",
+    "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b",   # credit cards
+    "\\b\\d{3}[- ]?\\d{2}[- ]?\\d{4}\\b",                # US SSN
+    "(?i)password\\s*[=:]\\s*\\S+",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+]
+
+[privacy]
+filter_enabled = true
+log_sensitive = false
+show_filter_notification = true     # always notify on a hit
+```
 
 ---
 
@@ -304,10 +469,9 @@ the (cached) program args.
   `monitoring.ignore_patterns` for the default regex set; add your
   own. `privacy.show_filter_notification` toggles the discreet macOS
   notification on filter hits.
-- **`tl logs clear-since`** exists via the MCP `textlog__clear_since`
-  tool: it deletes SQLite rows at or after a timestamp. The Markdown
-  archive is intentionally untouched — delete those files yourself if
-  you want them gone.
+- **`textlog__clear_since`** lets you (or Claude) wipe SQLite rows at
+  or after a timestamp. The Markdown archive is intentionally untouched
+  — delete those files yourself if you want them gone.
 - **Config file mode `0600`** is checked by `tl doctor`; warn-level if
   loose. The default config contains no secrets but you may add API
   keys (e.g. for future provider-aware features) so the warning stays.
@@ -327,26 +491,114 @@ fail; notifications denial is informational.
 
 ---
 
-## Troubleshooting
+## FAQ / troubleshooting
+
+### `tl doctor` first, every time
 
 ```bash
-tl doctor                          # Always start here.
-
+tl doctor                          # always start here
 cat ~/textlog/logs/stdout.log      # LaunchAgent stdout
 cat ~/textlog/logs/stderr.log      # LaunchAgent stderr
-
-tl uninstall && rm -rf ~/textlog && tl doctor   # Nuclear reset
-
-# Run the daemon visibly:
-tl uninstall && tl start --foreground
 ```
 
-If `claude mcp list` shows `✗ Failed to connect`:
+### Why isn't `"hi?"` showing up in `tl logs today`?
+
+Default `monitoring.min_length = 10`. Anything shorter is dropped before
+storage. Either accept it as noise filtering, or:
+
+```bash
+sed -i '' 's/^min_length = .*/min_length = 1/' ~/textlog/config.toml
+```
+
+then restart the daemon.
+
+### Why do I see the same content multiple times in the MD file?
+
+`Storage::insert` records every clipboard *transition*. If your clipboard
+manager (Raycast / Maccy / Paste / Alfred) re-asserts content, your terminal
+has copy-on-select enabled, or you re-copy the same text by hand, each
+write bumps `NSPasteboard.changeCount` and the daemon sees a new event.
+
+These duplicates are **never visible to Claude**: query-time dedup
+collapses them by `sha256`. The MD file is the durable per-event audit
+trail; the SQL queries are what Claude actually consumes.
+
+To reduce the MD-file duplication directly:
+- Disable `notifications.copy_log_path_on_complete` (v0.1.1+ — no
+  longer needed for path discovery).
+- Disable copy-on-select in your terminal app's preferences.
+
+### Claude can't find my MCP server
+
+```bash
+claude mcp list                    # textlog should show ✓ Connected
+```
+
+If `✗ Failed to connect`:
 
 ```bash
 # Hand-drive an initialize request to see the actual error:
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}}' | tl mcp
 ```
+
+If you see a JSON response, the server is fine — the issue is in
+Claude Code's registration. Try `claude mcp remove textlog` then re-add.
+
+### My screenshot OCR returns no text
+
+Check `ocr.min_confidence` (default `0.4`). On low-resolution screenshots
+or blurry text, Vision's confidence may sit below the threshold. Lower
+it to `0.2` to be more permissive, or set
+`ocr.recognition_level = "accurate"` if it's currently `"fast"`.
+
+### The daemon stopped after I edited config
+
+LaunchAgent caches `ProgramArguments`, not the config-file path or
+contents. The config is re-read on each `tl start`, so:
+
+```bash
+tl uninstall && tl install        # rewrites the plist + restarts cleanly
+```
+
+For `tl start --foreground`, just Ctrl-C and re-run.
+
+### Nuclear reset
+
+```bash
+tl uninstall
+rm -rf ~/textlog                  # config + db + MD archive all gone
+tl doctor                         # confirms clean slate
+```
+
+### Pasteboard permission denied
+
+System Settings → Privacy & Security → Pasteboard → enable `tl`.
+
+### Notifications muted
+
+System Settings → Notifications → `tl` → enable. (Or set
+`notifications.enabled = false` to never bother.)
+
+---
+
+## Comparison with alternatives
+
+|  | textlog | Raycast Clipboard History | Maccy / Paste | Rewind.ai |
+|---|---|---|---|---|
+| Background clipboard capture | yes | yes | yes | yes |
+| Searchable history | yes (FTS5) | yes (UI only) | yes (UI only) | yes |
+| Image OCR at capture time | **yes (Apple Vision)** | no | no | yes (cloud + local mix) |
+| Exposes to LLM via MCP | **yes** | no | no | no |
+| Local-only (zero network) | **yes** | yes | yes | no (cloud component) |
+| Per-day Markdown archive | **yes** | no | no | no |
+| Privacy regex filter at capture | **yes** | no | partial | no |
+| Open source | **yes (MIT)** | proprietary | proprietary | proprietary |
+| Built specifically for Claude Code | **yes** | no | no | no |
+| Standalone clipboard UI | **no** (intentional) | yes | yes | yes |
+
+`textlog` is not a clipboard manager. It's an LLM-facing clipboard
+backend. Use Raycast or Maccy for browsing your history visually; use
+`textlog` for letting Claude reason over it.
 
 ---
 
@@ -391,6 +643,9 @@ src/
 
 Specs live in `docs/superpowers/specs/` and the implementation plan
 in `docs/superpowers/plans/`.
+
+Contributions welcome — open an issue or PR at
+[github.com/xicv/textlog](https://github.com/xicv/textlog).
 
 ---
 
