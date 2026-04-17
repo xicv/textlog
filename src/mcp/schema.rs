@@ -93,6 +93,10 @@ pub struct CaptureSummary {
     /// For text rows this is the clipboard text; for images it is the
     /// OCR'd text (may be empty).
     pub text: Option<String>,
+    /// Absolute path to the daily Markdown archive this row was
+    /// mirrored into. Lets Claude `Read` the full day's context as a
+    /// single attachment without needing the path on the clipboard.
+    pub md_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_app: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

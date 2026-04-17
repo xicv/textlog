@@ -210,6 +210,7 @@ fn capture_summary(row: CaptureRow) -> CaptureSummary {
         sha256: hex_lower(&row.sha256),
         size_bytes: row.size_bytes,
         text: row.content,
+        md_path: row.md_path.to_string_lossy().into_owned(),
         source_app: row.source_app,
         source_url: row.source_url,
         ocr_confidence: row.ocr_confidence,
