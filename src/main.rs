@@ -11,6 +11,13 @@ mod pipeline;
 mod service;
 mod storage;
 
-fn main() {
-    println!("textlog — clipboard + OCR daemon, MCP server for Claude Code");
+use clap::Parser;
+
+#[tokio::main]
+async fn main() {
+    let cli = cli::Cli::parse();
+    if let Err(e) = cli::dispatch(cli).await {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
 }

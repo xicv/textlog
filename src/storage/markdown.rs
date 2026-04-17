@@ -62,22 +62,10 @@ pub fn append(path: &Path, row: &CaptureRow) -> Result<()> {
 /// Resolve the daily Markdown file path: `<log_dir>/<ts.format(date_format)>.md`.
 /// Expands a leading `~/` against the user's home directory.
 pub fn daily_path(log_dir: &str, date_format: &str, ts: DateTime<Utc>) -> PathBuf {
-    let mut base = expand_tilde(log_dir);
+    let mut base = super::expand_tilde(log_dir);
     let date = ts.format(date_format).to_string();
     base.push(format!("{date}.md"));
     base
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if path == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(path)
 }
 
 

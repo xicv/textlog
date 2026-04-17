@@ -14,6 +14,20 @@ pub mod sqlite;
 
 pub use sqlite::Storage;
 
+/// Expand a leading `~` or `~/` against the user's home directory.
+/// Used by storage paths in the config (`log_dir`, `sqlite_path`).
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
 /// Capture kind discriminator. Mirrors the spec's `captures.kind` column
 /// and the `kind:` frontmatter field on the daily Markdown file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
