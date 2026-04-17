@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub mod markdown;
 pub mod sqlite;
 
+pub use sqlite::Storage;
+
 /// Capture kind discriminator. Mirrors the spec's `captures.kind` column
 /// and the `kind:` frontmatter field on the daily Markdown file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
