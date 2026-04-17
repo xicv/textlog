@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::notifier::SystemNotifier;
 use crate::pipeline::Pipeline;
+use crate::service::{self, ServiceStatus, SystemLaunchctl};
 use crate::storage::{expand_tilde, hex_lower, CaptureRow, Kind, Storage};
 
 use super::args::{Cli, Command, ConfigCmd, LogsCmd};
@@ -29,19 +30,73 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Config { cmd } => run_config(cmd, &cfg, &cfg_path, &mut stdout),
         Command::Logs { cmd } => run_logs(cmd, &cfg, &mut stdout),
         Command::Doctor => print_unimplemented("doctor", &mut stdout),
-        Command::Install => print_unimplemented("install", &mut stdout),
-        Command::Uninstall => print_unimplemented("uninstall", &mut stdout),
+        Command::Install => run_install(&cfg, &mut stdout),
+        Command::Uninstall => run_uninstall(&mut stdout),
         Command::Start { foreground } => {
             if foreground {
                 drop(stdout);
                 run_start_foreground(&cfg).await
             } else {
-                print_unimplemented("start", &mut stdout)
+                run_start(&mut stdout)
             }
         }
-        Command::Stop => print_unimplemented("stop", &mut stdout),
-        Command::Status => print_unimplemented("status", &mut stdout),
+        Command::Stop => run_stop(&mut stdout),
+        Command::Status => run_status(&mut stdout),
     }
+}
+
+fn run_install<W: Write>(cfg: &Config, out: &mut W) -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| Error::Launchctl(format!("could not resolve current_exe: {e}")))?;
+    let log_dir = expand_tilde(&cfg.storage.log_dir);
+    std::fs::create_dir_all(&log_dir)?;
+    let runner = SystemLaunchctl;
+    let plist_path = service::install(&runner, &exe, &log_dir)?;
+    writeln!(
+        out,
+        "installed LaunchAgent at {} (program: {})",
+        plist_path.display(),
+        exe.display(),
+    )?;
+    Ok(())
+}
+
+fn run_uninstall<W: Write>(out: &mut W) -> Result<()> {
+    let runner = SystemLaunchctl;
+    service::uninstall(&runner)?;
+    writeln!(out, "uninstalled LaunchAgent com.textlog.agent")?;
+    Ok(())
+}
+
+fn run_start<W: Write>(out: &mut W) -> Result<()> {
+    service::start(&SystemLaunchctl)?;
+    writeln!(out, "kickstarted com.textlog.agent")?;
+    Ok(())
+}
+
+fn run_stop<W: Write>(out: &mut W) -> Result<()> {
+    service::stop(&SystemLaunchctl)?;
+    writeln!(out, "sent SIGTERM to com.textlog.agent")?;
+    Ok(())
+}
+
+fn run_status<W: Write>(out: &mut W) -> Result<()> {
+    match service::status(&SystemLaunchctl)? {
+        ServiceStatus::NotInstalled => {
+            writeln!(out, "status: not installed (run `tl install`)")?;
+        }
+        ServiceStatus::Installed {
+            loaded,
+            pid,
+            last_exit_code,
+        } => {
+            writeln!(
+                out,
+                "status: installed; loaded={loaded}; pid={pid:?}; last_exit={last_exit_code:?}"
+            )?;
+        }
+    }
+    Ok(())
 }
 
 async fn run_start_foreground(cfg: &Config) -> Result<()> {

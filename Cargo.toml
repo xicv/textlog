@@ -73,6 +73,9 @@ objc2-vision = { version = "0.3", features = [
 # macOS notifications
 notify-rust = "4"
 
+# Tiny POSIX bindings — only used for getuid() in the LaunchAgent wiring
+libc = "0.2"
+
 # MCP server SDK (stdio JSON-RPC 2.0)
 rmcp = { version = "1.4", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
