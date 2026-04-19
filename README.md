@@ -287,9 +287,13 @@ context with the new failure, iterates without you re-pasting.
 
 Two long-running tasks joined via `tokio::select!`:
 
-1. **Monitor loop** — `tokio::time::interval(poll_interval_ms)`,
-   `clipboard::poll_once` via `spawn_blocking`, pushes
-   `ClipboardEvent` into a bounded `mpsc(16)` channel with
+1. **Monitor loop** — polls `NSPasteboard.changeCount` directly on
+   the async task (it's a microsecond i64 read, no `spawn_blocking`
+   needed). Only falls through to `clipboard::poll_once` (FFI content
+   read) via `spawn_blocking` when the counter actually advances.
+   Exponential idle backoff: 500 ms active, doubling to a 2 s ceiling
+   after 20 unchanged ticks; any real change snaps back to active.
+   Pushes `ClipboardEvent` into a bounded `mpsc(16)` channel with
    drop-on-full backpressure.
 2. **Consumer** — drains the channel, runs filter → OCR → SHA-256 →
    `Storage::insert` → notifier, all SQLite work `spawn_blocking`'d so
@@ -298,9 +302,11 @@ Two long-running tasks joined via `tokio::select!`:
 ### Why these specific choices
 
 - **Polling, not event-driven.** macOS `NSPasteboard` has no public
-  notification API for change events. The 250 ms poll interval is
-  perceptually instant and costs <1% CPU at idle (`changeCount` is a
-  cheap getter — only a content read happens when it actually advances).
+  notification API for change events. The default 500 ms interval is
+  perceptually instant; combined with exponential idle backoff (up to
+  2 s) and a direct `changeCount` fast-path (no `spawn_blocking` when
+  unchanged), CPU at idle is effectively zero — only a content read
+  happens when the counter actually advances.
 - **SQLite + FTS5, not a fancier search engine.** FTS5 is built into
   SQLite, supports `MATCH 'foo'` queries with prefix wildcards, and
   ships zero extra binaries. Latency for a single-keyword search over
@@ -381,7 +387,7 @@ Keys you'll most likely want to touch:
 
 | key | default | why touch it |
 |---|---|---|
-| `monitoring.poll_interval_ms` | `250` | Lower = snappier; higher = less CPU |
+| `monitoring.poll_interval_ms` | `500` | Active-rate ceiling; idle backoff slows to a 2 s cap automatically. Lower = snappier; higher = even less CPU |
 | `monitoring.min_length` | `10` | Drop tiny copies (tab-switching noise). Lower to 1 if you want every clipboard transition recorded |
 | `monitoring.ignore_patterns` | API keys, CC numbers, passwords | Add your own regexes — anything matched is silently dropped |
 | `notifications.copy_log_path_on_complete` | `true` | If your clipboard manager cascades, set `false`. Claude still finds the path via `md_path` in MCP responses (v0.1.1+) |

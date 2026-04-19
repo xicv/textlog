@@ -57,7 +57,12 @@ impl Default for MonitoringConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            poll_interval_ms: 250,
+            // 500 ms matches Maccy's default and halves wakeups vs the
+            // previous 250 ms without a perceptible latency change —
+            // clipboard capture isn't latency-sensitive. The monitor
+            // loop also applies exponential backoff when idle, so
+            // sustained idle polling is well below this rate.
+            poll_interval_ms: 500,
             min_length: 10,
             ignore_patterns: vec![
                 r"^sk-[A-Za-z0-9]{20,}".into(),
@@ -212,7 +217,7 @@ mod tests {
     fn default_monitoring_matches_spec() {
         let m = MonitoringConfig::default();
         assert!(m.enabled);
-        assert_eq!(m.poll_interval_ms, 250);
+        assert_eq!(m.poll_interval_ms, 500);
         assert_eq!(m.min_length, 10);
         assert!(m.ignore_own_log_paths);
         assert_eq!(m.ignore_patterns.len(), 4);

@@ -5,7 +5,7 @@
 //! adds the polling task and the consumer loop and is exercised by
 //! `tl start --foreground`.
 
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -183,24 +183,60 @@ impl Pipeline {
 }
 
 async fn monitor_loop(
-    interval: Duration,
-    token: Arc<AtomicI64>,
+    base_interval: Duration,
+    self_write_token: Arc<AtomicI64>,
     tx: mpsc::Sender<ClipboardEvent>,
 ) {
+    // Two-tier polling. macOS has no NSPasteboard event API (see
+    // `clipboard.rs` preamble), so we poll. But humans don't copy four
+    // times per second, so running at the active rate 24/7 burns
+    // wakeups for nothing. Active rate = `base_interval`; after
+    // `BACKOFF_AFTER` consecutive unchanged ticks we double the sleep
+    // up to `max_interval`, and any real change resets back to active.
+    const BACKOFF_AFTER: u32 = 20;
+    let max_interval = base_interval
+        .saturating_mul(4)
+        .min(Duration::from_secs(2));
+
     let mut last = clipboard::current_change_count();
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut current = base_interval;
+    let mut idle_ticks: u32 = 0;
+
     loop {
-        ticker.tick().await;
-        let token = Arc::clone(&token);
+        tokio::time::sleep(current).await;
+
+        // Fast path: `changeCount` is an i64 ObjC property read
+        // (microseconds). Wrapping it in spawn_blocking on every tick
+        // pays a task alloc + context switch for no reason — do it
+        // directly on the async task instead.
+        let cc = clipboard::current_change_count();
+        if cc <= last {
+            idle_ticks = idle_ticks.saturating_add(1);
+            if idle_ticks >= BACKOFF_AFTER && current < max_interval {
+                current = current.saturating_mul(2).min(max_interval);
+            }
+            continue;
+        }
+
+        // Change detected — resume active rate.
+        idle_ticks = 0;
+        current = base_interval;
+
+        // Self-write? Mirror `last` forward but don't enqueue.
+        if cc == self_write_token.load(Ordering::SeqCst) {
+            last = cc;
+            continue;
+        }
+
+        // Slow path: the actual content read (NSString / PNG bytes)
+        // does enough FFI work to warrant the blocking pool.
+        let token = Arc::clone(&self_write_token);
         let result =
             tokio::task::spawn_blocking(move || clipboard::poll_once(&token, last)).await;
         match result {
             Ok(Ok(Some(ev))) => {
                 last = ev.change_count;
                 if ev.bytes.is_empty() {
-                    // Nothing to enqueue — but keep `last` updated so we
-                    // don't re-scan the same change count next tick.
                     continue;
                 }
                 if tx.try_send(ev).is_err() {
@@ -209,7 +245,13 @@ async fn monitor_loop(
                     );
                 }
             }
-            Ok(Ok(None)) => {}
+            Ok(Ok(None)) => {
+                // Race: a newer change (often our own write) slipped
+                // in between our fast-path read and `poll_once`'s
+                // check. Keep `last` in sync with what we observed so
+                // we don't re-enter the slow path every tick.
+                last = cc;
+            }
             Ok(Err(e)) => tracing::error!(?e, "clipboard poll error"),
             Err(e) => {
                 tracing::error!(?e, "clipboard poll task panicked");
