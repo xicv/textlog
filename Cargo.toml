@@ -1,6 +1,6 @@
 [package]
 name = "textlog"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.80"
 description = "macOS clipboard + OCR daemon exposed to Claude Code as an MCP server"

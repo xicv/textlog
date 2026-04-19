@@ -210,8 +210,9 @@ entire day's chronological transcript as a single attachment.
 
 In v0.1.0 the same workflow needed `notifications.copy_log_path_on_complete`,
 which copied the path to the clipboard after each capture and could
-cascade with some clipboard managers. v0.1.1 makes that side-effect
-optional — you can turn it off and Claude still finds the file.
+cascade with some clipboard managers. v0.1.1 made that side-effect
+optional; v0.1.6 turns it off by default — Claude still finds the
+file via `md_path` in the MCP response.
 
 ### 11. Code review prep
 Reviewing a PR? Click through every changed file in your IDE, copy the
@@ -389,7 +390,7 @@ Keys you'll most likely want to touch:
 | `monitoring.poll_interval_ms` | `500` | Active-rate ceiling; idle backoff slows to a 2 s cap automatically. Lower = snappier; higher = even less CPU |
 | `monitoring.min_length` | `10` | Drop tiny copies (tab-switching noise). Lower to 1 if you want every clipboard transition recorded |
 | `monitoring.ignore_patterns` | API keys, CC numbers, passwords | Add your own regexes — anything matched is silently dropped |
-| `notifications.copy_log_path_on_complete` | `true` | If your clipboard manager cascades, set `false`. Claude still finds the path via `md_path` in MCP responses (v0.1.1+) |
+| `notifications.copy_log_path_on_complete` | `false` | Write the daily MD path back to the clipboard after each capture. Off by default since v0.1.6 — Claude finds the path via `md_path` in MCP responses (v0.1.1+), so most users don't need it |
 | `notifications.on_capture` | `false` | A toast for every clipboard event — usually too noisy |
 | `storage.ring_buffer_size` | `1000` | SQLite cap; MD archive is never trimmed |
 | `storage.log_dir` | `~/textlog/logs` | Where daily MD files live |
@@ -530,8 +531,9 @@ collapses them by `sha256`. The MD file is the durable per-event audit
 trail; the SQL queries are what Claude actually consumes.
 
 To reduce the MD-file duplication directly:
-- Disable `notifications.copy_log_path_on_complete` (v0.1.1+ — no
-  longer needed for path discovery).
+- `notifications.copy_log_path_on_complete` is off by default from
+  v0.1.6 (it's no longer needed for path discovery). Leave it off
+  unless you explicitly want the path written back to your clipboard.
 - Disable copy-on-select in your terminal app's preferences.
 
 ### Claude can't find my MCP server

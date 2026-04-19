@@ -7,6 +7,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-04-19
+
+### Changed
+
+- **Breaking default.** `notifications.copy_log_path_on_complete` now
+  defaults to `false`. Previously the daemon wrote the daily-MD path
+  back to the clipboard after every capture, which cascaded in
+  clipboard managers and surprised users who only expected textlog to
+  *read* the clipboard. Claude already discovers the daily-MD via
+  `md_path` in MCP responses since v0.1.1, so the write-back hasn't
+  been necessary for a while.
+- Existing configs are not rewritten. If you have
+  `copy_log_path_on_complete = true` in `~/textlog/config.toml` and
+  want the new behavior, set it to `false` (or delete the line).
+
 ## [0.1.5] - 2026-04-19
 
 ### Performance

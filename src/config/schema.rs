@@ -149,7 +149,7 @@ impl Default for NotificationsConfig {
             enabled: true,
             on_capture: false,
             on_complete: true,
-            copy_log_path_on_complete: true,
+            copy_log_path_on_complete: false,
             sound: false,
         }
     }
@@ -242,12 +242,12 @@ mod tests {
     }
 
     #[test]
-    fn default_notifications_on_complete_copies_path() {
+    fn default_notifications_do_not_write_back_path() {
         let n = NotificationsConfig::default();
         assert!(n.enabled);
         assert!(!n.on_capture);
         assert!(n.on_complete);
-        assert!(n.copy_log_path_on_complete);
+        assert!(!n.copy_log_path_on_complete);
         assert!(!n.sound);
     }
 
