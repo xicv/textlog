@@ -571,6 +571,19 @@ tl uninstall && tl install        # rewrites the plist + restarts cleanly
 
 For `tl start --foreground`, just Ctrl-C and re-run.
 
+### After upgrading the binary (`cargo install textlog --force`)
+
+`tl stop` then `tl start` usually works — KeepAlive respawns the
+agent and picks up the new binary on disk. If launchd trips its
+throttle (`minimum runtime = 10`) because of rapid respawns, you'll
+see `tl status` stuck on `pid=None` and `launchctl print` will
+report `state = spawn scheduled` / `job state = spawn failed`. Fix
+it with a full re-bootstrap:
+
+```bash
+tl uninstall && tl install        # clears the throttle, re-bootstraps
+```
+
 ### Nuclear reset
 
 ```bash
