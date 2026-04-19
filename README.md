@@ -98,13 +98,10 @@ UI. The MCP server is the entire user-facing surface.
   permissions, LaunchAgent state, MCP registration, and a live Vision
   smoke test, then exits non-zero if anything is broken.
 
-### What's new in v0.1.1
+### Release history
 
-- `md_path` is now included on every `CaptureSummary`. This makes
-  scenario 10 ("daily-archive paste trick") work without
-  `notifications.copy_log_path_on_complete` — recommended for users
-  whose clipboard manager (Raycast / Maccy / Paste / Alfred) cascades
-  on the path-back-to-clipboard write.
+See [CHANGELOG.md](CHANGELOG.md). Latest version is always the one
+shown in the crates.io badge above.
 
 ---
 

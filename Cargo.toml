@@ -89,3 +89,15 @@ schemars = "1.0"
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
+
+# cargo-release: `cargo release patch` bumps Cargo.toml, rewrites
+# CHANGELOG.md (Unreleased → dated [x.y.z] section + new compare/tag
+# links), commits, tags, pushes, and publishes. Install once with
+# `cargo install cargo-release`. Dry-run with `cargo release patch`
+# (no `--execute`) before running for real with `--execute`.
+[package.metadata.release]
+tag-name = "v{{version}}"
+pre-release-replacements = [
+    { file = "CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+    { file = "CHANGELOG.md", search = "\\[Unreleased\\]: https://github.com/xicv/textlog/compare/v[0-9.]+\\.\\.\\.HEAD", replace = "[Unreleased]: https://github.com/xicv/textlog/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/xicv/textlog/releases/tag/v{{version}}", exactly = 1 },
+]
