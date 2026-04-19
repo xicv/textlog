@@ -70,6 +70,16 @@ pub enum Command {
     /// Update textlog to the latest version on crates.io
     /// (shells out to `cargo install textlog --force`).
     Update,
+
+    /// Sample the running daemon's CPU/RSS footprint via `ps`.
+    Perf {
+        /// Seconds to sample for.
+        #[arg(long, default_value_t = 10)]
+        duration: u64,
+        /// Sample interval in milliseconds.
+        #[arg(long = "interval-ms", default_value_t = 1000)]
+        interval_ms: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]

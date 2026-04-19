@@ -58,6 +58,11 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Stop => run_stop(&mut std::io::stdout().lock()),
         Command::Status => run_status(&mut std::io::stdout().lock()),
         Command::Update => run_update(&mut std::io::stdout().lock()),
+        Command::Perf { duration, interval_ms } => super::perf::run(
+            &cfg,
+            &mut std::io::stdout().lock(),
+            super::perf::PerfOpts { duration_secs: duration, interval_ms },
+        ),
     }
 }
 

@@ -340,6 +340,8 @@ tl logs search <QUERY> [--limit N]   FTS5 search; canonical row only
 tl logs path                    Print log directory
 
 tl doctor                       Run 8 health checks; non-zero exit on FAIL
+tl perf [--duration SECS]       Sample daemon CPU/RSS via `ps`
+       [--interval-ms MS]        (default 10 s @ 1 s)
 
 tl install                      Install LaunchAgent + bootstrap
 tl uninstall                    Bootout + remove plist
@@ -626,6 +628,7 @@ src/
     args.rs             clap derive structs
     commands.rs         Per-command handlers
     doctor.rs           tl doctor health checks
+    perf.rs             tl perf CPU/RSS sampling
   config/               TOML schema + load/save + env overlay
   error.rs              Top-level Error enum + Result alias
   filters.rs            Privacy filter (RegexSet)

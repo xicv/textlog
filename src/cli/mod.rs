@@ -4,6 +4,7 @@
 pub mod args;
 pub mod commands;
 pub mod doctor;
+pub mod perf;
 
 pub use args::Cli;
 pub use commands::dispatch;
