@@ -31,6 +31,7 @@ impl Storage {
     }
 
     /// Open an in-memory database — primarily for tests.
+    #[cfg(test)]
     pub fn open_in_memory(ring_buffer_size: usize) -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::with_connection(conn, ring_buffer_size)

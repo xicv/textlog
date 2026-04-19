@@ -8,8 +8,12 @@
 //! share the `Arc<AtomicI64>` self-write token in one place — Notifier
 //! just exposes the log path.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
 use std::sync::Arc;
 
 use crate::config::schema::NotificationsConfig;
@@ -58,6 +62,7 @@ impl Notifier for SystemNotifier {
 
 /// Notifier that only counts calls — for unit tests. Doesn't touch
 /// the OS notification centre.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct CountingNotifier {
     pub captured: AtomicUsize,
@@ -66,6 +71,7 @@ pub struct CountingNotifier {
     pub last_complete_path: std::sync::Mutex<Option<PathBuf>>,
 }
 
+#[cfg(test)]
 impl CountingNotifier {
     pub fn new() -> Self {
         Self::default()
@@ -84,6 +90,7 @@ impl CountingNotifier {
     }
 }
 
+#[cfg(test)]
 impl Notifier for CountingNotifier {
     fn notify_capture(&self, summary: &str) -> Result<()> {
         self.captured.fetch_add(1, Ordering::SeqCst);

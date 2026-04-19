@@ -62,6 +62,7 @@ pub fn generate(exe: &Path, log_dir: &Path) -> String {
 
 /// Convenience: resolve an unexpanded `log_dir` (which may start with
 /// `~/`) and pass through to `generate`.
+#[allow(dead_code)] // reserved for `tl install` wiring
 pub fn generate_for_config(exe: &Path, log_dir_cfg: &str) -> String {
     generate(exe, &expand_tilde(log_dir_cfg))
 }

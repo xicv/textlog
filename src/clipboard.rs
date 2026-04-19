@@ -174,8 +174,10 @@ impl ClipboardWriter for SystemClipboardWriter {
 
 /// No-op writer for environments where we don't want to touch the
 /// clipboard (tests, non-macOS dev builds).
+#[cfg(test)]
 pub struct NullClipboardWriter;
 
+#[cfg(test)]
 impl ClipboardWriter for NullClipboardWriter {
     fn write_text(&self, _s: &str) -> Result<i64> {
         Ok(0)
@@ -184,12 +186,14 @@ impl ClipboardWriter for NullClipboardWriter {
 
 /// Test double that records every call and returns monotonically
 /// increasing fake changeCounts.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct CountingClipboardWriter {
     pub calls: std::sync::Mutex<Vec<String>>,
     pub next_change_count: std::sync::atomic::AtomicI64,
 }
 
+#[cfg(test)]
 impl CountingClipboardWriter {
     pub fn new() -> Self {
         Self::default()
@@ -200,6 +204,7 @@ impl CountingClipboardWriter {
     }
 }
 
+#[cfg(test)]
 impl ClipboardWriter for CountingClipboardWriter {
     fn write_text(&self, s: &str) -> Result<i64> {
         self.calls.lock().unwrap().push(s.to_string());

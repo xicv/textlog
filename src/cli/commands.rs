@@ -234,16 +234,6 @@ pub fn run_logs<W: Write>(cmd: LogsCmd, cfg: &Config, out: &mut W) -> Result<()>
     }
 }
 
-fn print_unimplemented<W: Write>(name: &str, out: &mut W) -> Result<()> {
-    writeln!(
-        out,
-        "`tl {name}` is not yet implemented (Phase 7+ pending — see docs/superpowers/plans)"
-    )?;
-    Err(Error::ClipboardAccess(format!(
-        "tl {name} requires the pipeline / LaunchAgent phases"
-    )))
-}
-
 fn print_rows<W: Write>(out: &mut W, rows: &[CaptureRow]) -> Result<()> {
     if rows.is_empty() {
         writeln!(out, "(no captures)")?;

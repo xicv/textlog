@@ -27,6 +27,7 @@ impl PrivacyFilter {
         Self::compile(&monitoring.ignore_patterns, privacy.filter_enabled)
     }
 
+    #[cfg(test)]
     pub fn disabled() -> Self {
         Self { set: None, enabled: false }
     }

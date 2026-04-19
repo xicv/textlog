@@ -4,6 +4,7 @@
 //! double in tests instead of mutating the real launchd state.
 
 use std::process::Command;
+#[cfg(test)]
 use std::sync::Mutex;
 
 use crate::error::{Error, Result};
@@ -38,6 +39,7 @@ impl LaunchctlRunner for SystemLaunchctl {
 /// Test double: records every invocation and returns either a per-arg
 /// canned `LaunchctlOutput` (set via `set_response`) or the default
 /// `success` output.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct RecordingLaunchctl {
     pub calls: Mutex<Vec<Vec<String>>>,
@@ -46,6 +48,7 @@ pub struct RecordingLaunchctl {
     pub responses: Mutex<std::collections::HashMap<String, LaunchctlOutput>>,
 }
 
+#[cfg(test)]
 impl RecordingLaunchctl {
     pub fn new() -> Self {
         Self::default()
@@ -61,6 +64,7 @@ impl RecordingLaunchctl {
     }
 }
 
+#[cfg(test)]
 impl LaunchctlRunner for RecordingLaunchctl {
     fn run(&self, args: &[&str]) -> Result<LaunchctlOutput> {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();

@@ -5,12 +5,14 @@ use super::schema::Config;
 /// Apply environment variable overrides to a config.
 ///
 /// Env takes precedence over the file (defaults → file → env → CLI flags).
+#[allow(dead_code)] // public API reserved for wiring into loader
 pub fn apply_env(cfg: &mut Config) {
     let env: HashMap<String, String> = std::env::vars().collect();
     apply_env_map(cfg, &env);
 }
 
 /// Pure function used by tests: same logic as `apply_env` but over a caller-provided map.
+#[allow(dead_code)] // public API reserved for wiring into loader
 pub fn apply_env_map(cfg: &mut Config, env: &HashMap<String, String>) {
     if let Some(v) = env.get("TEXTLOG_LOG_DIR") {
         cfg.storage.log_dir = v.clone();

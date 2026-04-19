@@ -26,6 +26,7 @@ use super::schema::{
 pub struct McpServer {
     storage: Arc<Storage>,
     ocr_cfg: Arc<OcrConfig>,
+    #[allow(dead_code)] // populated by #[tool_router] macro; read via ServerHandler impl
     tool_router: ToolRouter<Self>,
 }
 
