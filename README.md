@@ -21,6 +21,7 @@ Claude Code is the LLM, `textlog` is its eyes on your clipboard.
 - [Why this exists](#why-this-exists)
 - [Features](#features)
 - [Quickstart](#quickstart)
+  - [Registration scope](#registration-scope)
 - [Real scenarios](#real-scenarios)
 - [Architecture](#architecture)
 - [CLI reference](#cli-reference)
@@ -66,7 +67,7 @@ UI. The MCP server is the entire user-facing surface.
 
 - **MCP server with 6 tools** — `textlog__get_recent`, `__search`,
   `__list_today`, `__ocr_latest`, `__ocr_image`, `__clear_since`.
-  Registers in one command: `claude mcp add textlog -- tl mcp`.
+  Registers in one command: `claude mcp add --scope user textlog -- tl mcp`.
 - **On-device OCR** via `VNRecognizeTextRequest` (Apple Vision). No cloud
   call, no API key, no rate limit. Honours `recognition_level`
   (`"accurate"` | `"fast"`) and a configurable language list.
@@ -119,8 +120,9 @@ tl doctor
 # Optional: register as a LaunchAgent so it auto-starts on login.
 tl install
 
-# Register as an MCP server in Claude Code.
-claude mcp add textlog -- tl mcp
+# Register as an MCP server in Claude Code (user scope recommended —
+# see "Registration scope" below for why).
+claude mcp add --scope user textlog -- tl mcp
 
 # Confirm.
 claude mcp list
@@ -132,6 +134,47 @@ clipboard?" — Claude calls `textlog__get_recent` and reads the answer.
 If you'd rather run only when you ask, skip `tl install` and run
 `tl start --foreground` in a terminal tab — the daemon prints to
 stdout and stops on Ctrl-C.
+
+### Registration scope
+
+Claude Code's `claude mcp add` supports three scopes, picked with
+`--scope <local|user|project>`. For `textlog` — a single-user clipboard
+daemon with a per-user MD archive — **user scope is almost always the
+right choice**:
+
+```bash
+# User scope (recommended).
+# Stored in ~/.claude.json. Loads in every Claude Code session you
+# start on this machine, from any directory. Best fit for textlog.
+claude mcp add --scope user textlog -- tl mcp
+
+# Local scope (the default when --scope is omitted).
+# Stored per-project in ~/.claude.json under the current working dir.
+# textlog only appears in sessions launched from this exact directory,
+# which is almost never what you want for a personal clipboard tool.
+claude mcp add textlog -- tl mcp
+
+# Project scope.
+# Writes a `.mcp.json` at the repo root, intended to be committed so
+# every collaborator auto-registers the same servers. Not a great fit
+# for textlog: every teammate would still need `tl` installed locally,
+# the MD archive is strictly per-user, and the daemon has to be running
+# on each machine.
+claude mcp add --scope project textlog -- tl mcp
+```
+
+Switching scope means removing the existing registration first:
+
+```bash
+claude mcp list                         # shows which scope textlog is in
+claude mcp remove textlog               # drops it from whichever scope
+claude mcp add --scope user textlog -- tl mcp
+```
+
+If you previously followed an older version of this README (no
+`--scope` flag) and then moved to a different project directory, your
+MCP registration seems to "disappear" — that's local scope working as
+designed. Re-add with `--scope user` and it follows you everywhere.
 
 ---
 
