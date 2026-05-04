@@ -6,8 +6,8 @@
 
 `textlog` runs quietly in the background, watches your clipboard and
 screenshots, OCRs images with the same engine the macOS system uses, and
-makes everything searchable by Claude Code through six `textlog__*` MCP
-tools. Nothing leaves your machine. There is no LLM inside `textlog` —
+makes everything searchable by Claude Code through seven `textlog__*`
+MCP tools. Nothing leaves your machine. There is no LLM inside `textlog` —
 Claude Code is the LLM, `textlog` is its eyes on your clipboard.
 
 [![crates.io](https://img.shields.io/crates/v/textlog.svg)](https://crates.io/crates/textlog)
@@ -65,9 +65,16 @@ UI. The MCP server is the entire user-facing surface.
 
 ## Features
 
-- **MCP server with 6 tools** — `textlog__get_recent`, `__search`,
-  `__list_today`, `__ocr_latest`, `__ocr_image`, `__clear_since`.
-  Registers in one command: `claude mcp add --scope user textlog -- tl mcp`.
+- **MCP server with 7 tools** — `textlog__get_recent`, `__search`,
+  `__list_today`, `__get_capture`, `__ocr_latest`, `__ocr_image`,
+  `__clear_since`. Registers in one command:
+  `claude mcp add --scope user textlog -- tl mcp`.
+- **Preview-by-default responses (v0.1.7+).** List-style tools
+  (`get_recent`, `list_today`, `search`) return a 200-char `text_preview`
+  plus a `truncated: bool` flag instead of the full body. A 5-row
+  `get_recent` against large copies dropped from ~10 k to ~250 tokens.
+  Claude calls `textlog__get_capture(id)` only for rows it actually
+  needs to expand.
 - **On-device OCR** via `VNRecognizeTextRequest` (Apple Vision). No cloud
   call, no API key, no rate limit. Honours `recognition_level`
   (`"accurate"` | `"fast"`) and a configurable language list.
@@ -401,17 +408,31 @@ Global flag: `--config-dir <PATH>` (env: `TEXTLOG_CONFIG_DIR`) overrides
 
 | Tool | Args | Returns | Purpose |
 |---|---|---|---|
-| `textlog__get_recent` | `n` (default 5), `kind?` (`text`\|`image`\|`any`) | `{ captures: [{ id, ts, kind, sha256, size_bytes, text, md_path, source_app?, source_url?, ocr_confidence? }] }` | Latest N captures, deduped by sha256 |
+| `textlog__get_recent` | `n` (default 5), `kind?` (`text`\|`image`\|`any`) | `{ captures: [{ id, ts, kind, sha256, size_bytes, text_preview, truncated, md_path, source_app?, source_url?, ocr_confidence? }] }` | Latest N captures, deduped by sha256 |
 | `textlog__list_today` | `kind?` | same shape as `get_recent` | Everything from today (UTC) |
 | `textlog__search` | `query`, `limit` (default 20), `since?` ISO 8601 | `{ hits: [{ capture, duplicate_of? }] }` | FTS5 search; later occurrences marked |
+| `textlog__get_capture` | `id` (from any summary above) | `{ id, ts, kind, sha256, size_bytes, text, md_path, source_app?, source_url?, ocr_confidence? }` | Full untruncated body for a single capture |
 | `textlog__ocr_latest` | none | `{ text, confidence, captured_at }` | Cached OCR text from the last image |
 | `textlog__ocr_image` | `path` (absolute) | `{ text, confidence, block_count }` | Ad-hoc OCR of any file |
 | `textlog__clear_since` | `ts` ISO 8601 | `{ deleted_count }` | Privacy cut-off (SQLite only; MD untouched) |
 
 All input/output schemas are published via MCP `tools/list`.
+
+**Two-tier body retrieval (v0.1.7+).** The list-style tools
+(`get_recent`, `list_today`, `search`) return a `text_preview` capped
+at 200 characters plus a `truncated: bool` flag. When `truncated` is
+true, Claude can fetch the full body via
+`textlog__get_capture({ id })`. This keeps a default 5-row
+`get_recent` under ~250 tokens regardless of how large each underlying
+copy was; previously a single big paste could blow the response past
+10 k tokens. `size_bytes` on every summary tells Claude how much it's
+missing so it can decide whether to expand.
+
 `md_path` was added in v0.1.1 — it's the absolute path of the daily
 Markdown file the row was mirrored into, so Claude can `Read` the
-entire day's context without any clipboard round-trip.
+entire day's context without any clipboard round-trip. This is also
+the recovery path for captures older than `storage.ring_buffer_size`
+(default 1000): SQLite trims them, but the daily MD on disk doesn't.
 
 ---
 
@@ -697,7 +718,7 @@ src/
   pipeline.rs           Pipeline::process_event + run loop
   mcp/
     mod.rs              run_stdio entry point
-    tools.rs            McpServer + 6 #[tool] handlers
+    tools.rs            McpServer + 7 #[tool] handlers
     schema.rs           Argument + result types (JsonSchema)
   service/
     mod.rs              install/uninstall/start/stop/status
