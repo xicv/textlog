@@ -7,6 +7,40 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-05-04
+
+### Changed
+
+- **Breaking MCP shape.** `CaptureSummary.text` is now `text_preview` —
+  the first 200 characters of the capture body — accompanied by a new
+  `truncated: bool` flag. List-style responses (`textlog__get_recent`,
+  `textlog__list_today`, `textlog__search`) no longer dump full
+  clipboard bodies into Claude's context. A 5-row `get_recent` that
+  used to spend ~10 k tokens on large copies now returns ~250 tokens.
+- The `id` field on every summary doubles as a handle for the new
+  full-body fetch.
+
+### Added
+
+- `textlog__get_capture(id)` — returns the full untruncated body for a
+  single capture. Use this when `text_preview` was marked
+  `truncated: true`. Errors with `INVALID_PARAMS` if the row was
+  trimmed by the ring buffer or the id never existed.
+- `Storage::get_by_id(id)` on the SQLite layer powering the new tool.
+- Server-instructions string updated so Claude is told to expand
+  truncated previews via `get_capture` instead of guessing at body
+  length.
+
+### Why
+
+Before this release the MCP server eagerly serialized the entire
+clipboard body for every recent capture, so a single large copy could
+blow past 10 k tokens on a default `n=5` request. The fix is at the
+response shape, not the on-disk layout — splitting the daily Markdown
+file into per-capture chunks would have moved bytes around without
+changing what MCP returns. Truncating at the wire boundary plus a
+lazy-fetch tool gives the same coverage at ~10× lower token cost.
+
 ## [0.1.6] - 2026-04-19
 
 ### Changed

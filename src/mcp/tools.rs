@@ -16,10 +16,31 @@ use crate::ocr;
 use crate::storage::{hex_lower, CaptureRow, Kind, SearchHit, Storage};
 
 use super::schema::{
-    CaptureList, CaptureSummary, ClearSinceArgs, ClearSinceResult, GetRecentArgs, KindFilter,
-    ListTodayArgs, OcrImageArgs, OcrLatestResult, OcrResult, SearchArgs, SearchResult,
-    SearchResults,
+    CaptureFull, CaptureList, CaptureSummary, ClearSinceArgs, ClearSinceResult, GetCaptureArgs,
+    GetRecentArgs, KindFilter, ListTodayArgs, OcrImageArgs, OcrLatestResult, OcrResult,
+    SearchArgs, SearchResult, SearchResults,
 };
+
+/// Maximum characters of clipboard body returned in list-style MCP
+/// responses. Beyond this, callers must fetch the full body via
+/// `textlog__get_capture`. 200 chars ≈ 50 tokens — enough to identify
+/// a capture, small enough that 5 rows still fit in ~250 tokens.
+const PREVIEW_CHARS: usize = 200;
+
+/// Slice the leading `PREVIEW_CHARS` characters off `s`, on a UTF-8
+/// char boundary. Returns the prefix and a flag indicating truncation.
+fn truncate_to_preview(s: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut iter = s.chars();
+    for _ in 0..PREVIEW_CHARS {
+        match iter.next() {
+            Some(c) => out.push(c),
+            None => return (out, false),
+        }
+    }
+    let truncated = iter.next().is_some();
+    (out, truncated)
+}
 
 /// MCP server state — owns the Storage handle and rmcp's tool router.
 #[derive(Clone)]
@@ -143,6 +164,33 @@ impl McpServer {
         Ok(Json(ClearSinceResult { deleted_count: deleted }))
     }
 
+    /// Fetch the full body of a single capture by `id`. Used to expand
+    /// a truncated preview returned by `get_recent` / `list_today` /
+    /// `search` without re-paying their list-shape token cost.
+    #[tool(
+        name = "textlog__get_capture",
+        description = "Return the full clipboard body (untruncated) for the capture with \
+                       the given `id`. Use this to expand a row whose `text_preview` was \
+                       marked `truncated: true`. Errors with INVALID_PARAMS if no row matches \
+                       (e.g. trimmed by the ring buffer)."
+    )]
+    pub async fn get_capture(
+        &self,
+        Parameters(args): Parameters<GetCaptureArgs>,
+    ) -> Result<Json<CaptureFull>, ErrorData> {
+        let storage = Arc::clone(&self.storage);
+        let id = args.id;
+        let row = blocking(move || storage.get_by_id(id)).await?;
+        match row {
+            Some(r) => Ok(Json(capture_full(r))),
+            None => Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("no capture with id {id} (may have been trimmed)"),
+                None,
+            )),
+        }
+    }
+
     /// Ad-hoc OCR of an image file outside the clipboard stream.
     #[tool(
         name = "textlog__ocr_image",
@@ -185,8 +233,10 @@ impl ServerHandler for McpServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
             "textlog: clipboard + OCR archive accessed via textlog__* tools. \
-             Use textlog__get_recent for the latest items, textlog__search for FTS5 lookup, \
-             textlog__ocr_latest for the last image's OCR text."
+             List tools (get_recent, list_today, search) return a 200-char `text_preview` \
+             plus a `truncated` flag — call textlog__get_capture(id) to fetch the full body \
+             only when the preview is insufficient. textlog__ocr_latest returns the last \
+             image's OCR text in full."
                 .into(),
         );
         info
@@ -204,7 +254,30 @@ fn filter_to_kind(filter: Option<KindFilter>) -> Option<Kind> {
 }
 
 fn capture_summary(row: CaptureRow) -> CaptureSummary {
+    let (text_preview, truncated) = match row.content.as_deref() {
+        Some(s) => {
+            let (prefix, t) = truncate_to_preview(s);
+            (Some(prefix), t)
+        }
+        None => (None, false),
+    };
     CaptureSummary {
+        id: row.id,
+        ts: row.ts.to_rfc3339(),
+        kind: row.kind.as_str().to_string(),
+        sha256: hex_lower(&row.sha256),
+        size_bytes: row.size_bytes,
+        text_preview,
+        truncated,
+        md_path: row.md_path.to_string_lossy().into_owned(),
+        source_app: row.source_app,
+        source_url: row.source_url,
+        ocr_confidence: row.ocr_confidence,
+    }
+}
+
+fn capture_full(row: CaptureRow) -> CaptureFull {
+    CaptureFull {
         id: row.id,
         ts: row.ts.to_rfc3339(),
         kind: row.kind.as_str().to_string(),
@@ -349,7 +422,8 @@ mod tests {
         let cs = &images.0.captures;
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].kind, "image");
-        assert_eq!(cs[0].text.as_deref(), Some("ocr text"));
+        assert_eq!(cs[0].text_preview.as_deref(), Some("ocr text"));
+        assert!(!cs[0].truncated, "short body must not be flagged truncated");
         assert!(cs[0].sha256.starts_with("0202"));
     }
 
@@ -513,7 +587,8 @@ mod tests {
             .unwrap();
         let cs = &res.0.captures;
         assert_eq!(cs.len(), 1);
-        assert_eq!(cs[0].text.as_deref(), Some("fresh"));
+        assert_eq!(cs[0].text_preview.as_deref(), Some("fresh"));
+        assert!(!cs[0].truncated);
     }
 
     #[tokio::test]
@@ -538,5 +613,82 @@ mod tests {
         let info = server.get_info();
         assert!(info.capabilities.tools.is_some());
         assert!(info.instructions.unwrap().contains("textlog"));
+    }
+
+    #[test]
+    fn truncate_short_string_is_not_marked_truncated() {
+        let (out, t) = truncate_to_preview("hello");
+        assert_eq!(out, "hello");
+        assert!(!t);
+    }
+
+    #[test]
+    fn truncate_long_string_caps_at_preview_chars_and_flags() {
+        let big = "a".repeat(PREVIEW_CHARS * 3);
+        let (out, t) = truncate_to_preview(&big);
+        assert_eq!(out.chars().count(), PREVIEW_CHARS);
+        assert!(t);
+    }
+
+    #[test]
+    fn truncate_handles_multibyte_chars_on_boundary() {
+        // Each "é" is 2 bytes / 1 char. Build a string longer than the
+        // preview limit; ensure we don't slice mid-codepoint.
+        let s = "é".repeat(PREVIEW_CHARS + 50);
+        let (out, t) = truncate_to_preview(&s);
+        assert!(t);
+        assert_eq!(out.chars().count(), PREVIEW_CHARS);
+        // Result must be valid UTF-8 (String guarantees this, but the
+        // count-by-chars assertion above also catches mid-codepoint cuts).
+        assert!(out.chars().all(|c| c == 'é'));
+    }
+
+    #[tokio::test]
+    async fn get_recent_truncates_long_body_and_flags() {
+        let (server, tmp) = server_with_storage();
+        let big = "x".repeat(PREVIEW_CHARS * 5);
+        server
+            .storage
+            .insert(&row(Utc::now(), Kind::Text, 1, Some(&big), tmp.path()))
+            .unwrap();
+
+        let res = server
+            .get_recent(Parameters(GetRecentArgs { n: 5, kind: None }))
+            .await
+            .unwrap();
+        let cs = &res.0.captures;
+        assert_eq!(cs.len(), 1);
+        let preview = cs[0].text_preview.as_deref().unwrap();
+        assert_eq!(preview.chars().count(), PREVIEW_CHARS, "preview must be capped");
+        assert!(cs[0].truncated, "long body must set truncated=true");
+        assert_eq!(cs[0].size_bytes, big.len(), "size_bytes reports full length");
+    }
+
+    #[tokio::test]
+    async fn get_capture_returns_full_body_for_existing_id() {
+        let (server, tmp) = server_with_storage();
+        let big = "y".repeat(PREVIEW_CHARS * 4);
+        let id = server
+            .storage
+            .insert(&row(Utc::now(), Kind::Text, 1, Some(&big), tmp.path()))
+            .unwrap();
+
+        let res = server
+            .get_capture(Parameters(GetCaptureArgs { id }))
+            .await
+            .unwrap();
+        assert_eq!(res.0.id, id);
+        assert_eq!(res.0.text.as_deref(), Some(big.as_str()));
+    }
+
+    #[tokio::test]
+    async fn get_capture_errors_on_missing_id() {
+        let (server, _tmp) = server_with_storage();
+        let err = server
+            .get_capture(Parameters(GetCaptureArgs { id: 9_999_999 }))
+            .await
+            .err()
+            .expect("expected an error");
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
 }

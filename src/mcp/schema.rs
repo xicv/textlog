@@ -69,6 +69,12 @@ pub struct OcrImageArgs {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GetCaptureArgs {
+    /// SQLite row id of the capture (from `CaptureSummary.id`).
+    pub id: i64,
+}
+
 // ---- result structs ---------------------------------------------------
 
 /// MCP requires tool outputs to be JSON objects (not bare arrays), so
@@ -90,12 +96,35 @@ pub struct CaptureSummary {
     pub kind: String,
     pub sha256: String,
     pub size_bytes: usize,
-    /// For text rows this is the clipboard text; for images it is the
-    /// OCR'd text (may be empty).
-    pub text: Option<String>,
+    /// First N characters of the capture body (text or OCR result).
+    /// Truncated to keep MCP responses small. When `truncated` is true,
+    /// fetch the full body via `textlog__get_capture` with this row's `id`.
+    pub text_preview: Option<String>,
+    /// `true` when `text_preview` is shorter than the full content.
+    pub truncated: bool,
     /// Absolute path to the daily Markdown archive this row was
     /// mirrored into. Lets Claude `Read` the full day's context as a
     /// single attachment without needing the path on the clipboard.
+    pub md_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_app: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_confidence: Option<f32>,
+}
+
+/// Full capture body — returned only by `textlog__get_capture` to avoid
+/// dumping potentially large bodies into list-style responses.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CaptureFull {
+    pub id: i64,
+    pub ts: String,
+    pub kind: String,
+    pub sha256: String,
+    pub size_bytes: usize,
+    /// Full clipboard text (or OCR text for images). May be empty/null.
+    pub text: Option<String>,
     pub md_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_app: Option<String>,

@@ -103,6 +103,25 @@ impl Storage {
         rows.into_iter().collect()
     }
 
+    /// Lookup a single capture by its primary-key id. Returns `None` if
+    /// the row was trimmed by the ring buffer or never existed.
+    pub fn get_by_id(&self, id: i64) -> Result<Option<CaptureRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, kind, sha256, size_bytes, content,
+                    ocr_confidence, source_app, source_url, md_path
+             FROM captures
+             WHERE id = ?1",
+        )?;
+        let mut iter = stmt.query_map(rusqlite::params![id], row_from_sqlite)?;
+        match iter.next() {
+            None => Ok(None),
+            Some(Ok(Ok(row))) => Ok(Some(row)),
+            Some(Ok(Err(e))) => Err(e),
+            Some(Err(e)) => Err(e.into()),
+        }
+    }
+
     /// Most recent image capture, or None.
     pub fn get_latest_image(&self) -> Result<Option<CaptureRow>> {
         let conn = self.lock()?;
