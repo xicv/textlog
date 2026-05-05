@@ -411,7 +411,7 @@ Global flag: `--config-dir <PATH>` (env: `TEXTLOG_CONFIG_DIR`) overrides
 | `textlog__get_recent` | `n` (default 5), `kind?` (`text`\|`image`\|`any`) | `{ captures: [{ id, ts, kind, sha256, size_bytes, text_preview, truncated, md_path, source_app?, source_url?, ocr_confidence? }] }` | Latest N captures, deduped by sha256 |
 | `textlog__list_today` | `kind?` | same shape as `get_recent` | Everything from today (UTC) |
 | `textlog__search` | `query`, `limit` (default 20), `since?` ISO 8601 | `{ hits: [{ capture, duplicate_of? }] }` | FTS5 search; later occurrences marked |
-| `textlog__get_capture` | `id` (from any summary above) | `{ id, ts, kind, sha256, size_bytes, text, md_path, source_app?, source_url?, ocr_confidence? }` | Full untruncated body for a single capture |
+| `textlog__get_capture` | `id` (from any summary above), `offset?` (default 0), `limit?` (default 8000 chars, max 32000) | `{ id, ts, kind, sha256, size_bytes, text, text_offset, text_total_chars, truncated, md_path, source_app?, source_url?, ocr_confidence? }` | Windowed slice of a single capture body; page until `truncated == false` |
 | `textlog__ocr_latest` | none | `{ text, confidence, captured_at }` | Cached OCR text from the last image |
 | `textlog__ocr_image` | `path` (absolute) | `{ text, confidence, block_count }` | Ad-hoc OCR of any file |
 | `textlog__clear_since` | `ts` ISO 8601 | `{ deleted_count }` | Privacy cut-off (SQLite only; MD untouched) |
@@ -421,12 +421,22 @@ All input/output schemas are published via MCP `tools/list`.
 **Two-tier body retrieval (v0.1.7+).** The list-style tools
 (`get_recent`, `list_today`, `search`) return a `text_preview` capped
 at 200 characters plus a `truncated: bool` flag. When `truncated` is
-true, Claude can fetch the full body via
-`textlog__get_capture({ id })`. This keeps a default 5-row
-`get_recent` under ~250 tokens regardless of how large each underlying
-copy was; previously a single big paste could blow the response past
-10 k tokens. `size_bytes` on every summary tells Claude how much it's
-missing so it can decide whether to expand.
+true, Claude fetches the body via `textlog__get_capture({ id })`.
+This keeps a default 5-row `get_recent` under ~250 tokens regardless
+of how large each underlying copy was; previously a single big paste
+could blow the response past 10 k tokens. `size_bytes` on every
+summary tells Claude how much it's missing so it can decide whether
+to expand.
+
+**Paginated body fetch (v0.1.8+).** `textlog__get_capture` now slices
+the body to a configurable window so even a 50 k-char build log can be
+retrieved without overflowing the MCP per-tool token budget. The
+default `limit` is 8000 chars (≈2000 tokens), capped server-side at
+32000 chars (≈8000 tokens). The response carries `text_offset`,
+`text_total_chars`, and `truncated` — page forward with
+`offset = text_offset + text.chars().count()` until `truncated` is
+false. Bodies smaller than the default window are returned in one
+shot exactly as before.
 
 `md_path` was added in v0.1.1 — it's the absolute path of the daily
 Markdown file the row was mirrored into, so Claude can `Read` the

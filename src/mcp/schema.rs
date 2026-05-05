@@ -73,7 +73,22 @@ pub struct OcrImageArgs {
 pub struct GetCaptureArgs {
     /// SQLite row id of the capture (from `CaptureSummary.id`).
     pub id: i64,
+    /// Character offset into `text` to start the slice. Defaults to 0.
+    /// Use with `limit` to page through bodies that overflow the MCP
+    /// per-tool token budget.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Max characters of `text` to return. Defaults to 8000
+    /// (≈2000 tokens). Capped server-side at 32000 (≈8000 tokens) to
+    /// prevent single-call token blow-ups on huge captures.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
+
+/// Default character window when caller omits `limit`.
+pub const GET_CAPTURE_DEFAULT_LIMIT: usize = 8000;
+/// Hard ceiling on `limit` regardless of caller request.
+pub const GET_CAPTURE_MAX_LIMIT: usize = 32000;
 
 // ---- result structs ---------------------------------------------------
 
@@ -115,7 +130,10 @@ pub struct CaptureSummary {
 }
 
 /// Full capture body — returned only by `textlog__get_capture` to avoid
-/// dumping potentially large bodies into list-style responses.
+/// dumping potentially large bodies into list-style responses. The
+/// `text` field is windowed by the request's `offset`/`limit`; callers
+/// page using `text_offset` + `text.chars().count()` against
+/// `text_total_chars`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CaptureFull {
     pub id: i64,
@@ -123,8 +141,18 @@ pub struct CaptureFull {
     pub kind: String,
     pub sha256: String,
     pub size_bytes: usize,
-    /// Full clipboard text (or OCR text for images). May be empty/null.
+    /// Slice of the capture body covering chars
+    /// `[text_offset, text_offset + text.chars().count())`. May be
+    /// empty or null when the row has no body.
     pub text: Option<String>,
+    /// Starting character index of `text` within the full body.
+    pub text_offset: usize,
+    /// Total character count of the full body, regardless of slice.
+    pub text_total_chars: usize,
+    /// `true` when the returned `text` slice does not reach the end of
+    /// the full body — page forward with `offset = text_offset +
+    /// text.chars().count()`.
+    pub truncated: bool,
     pub md_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_app: Option<String>,

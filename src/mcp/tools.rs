@@ -18,7 +18,7 @@ use crate::storage::{hex_lower, CaptureRow, Kind, SearchHit, Storage};
 use super::schema::{
     CaptureFull, CaptureList, CaptureSummary, ClearSinceArgs, ClearSinceResult, GetCaptureArgs,
     GetRecentArgs, KindFilter, ListTodayArgs, OcrImageArgs, OcrLatestResult, OcrResult,
-    SearchArgs, SearchResult, SearchResults,
+    SearchArgs, SearchResult, SearchResults, GET_CAPTURE_DEFAULT_LIMIT, GET_CAPTURE_MAX_LIMIT,
 };
 
 /// Maximum characters of clipboard body returned in list-style MCP
@@ -164,15 +164,18 @@ impl McpServer {
         Ok(Json(ClearSinceResult { deleted_count: deleted }))
     }
 
-    /// Fetch the full body of a single capture by `id`. Used to expand
-    /// a truncated preview returned by `get_recent` / `list_today` /
-    /// `search` without re-paying their list-shape token cost.
+    /// Fetch a windowed slice of a single capture body by `id`. Used
+    /// to expand a truncated preview returned by `get_recent` /
+    /// `list_today` / `search` without re-paying their list-shape
+    /// token cost. Caller pages via `offset` + `limit` so a 50K-char
+    /// body never overflows the MCP per-tool token budget.
     #[tool(
         name = "textlog__get_capture",
-        description = "Return the full clipboard body (untruncated) for the capture with \
-                       the given `id`. Use this to expand a row whose `text_preview` was \
-                       marked `truncated: true`. Errors with INVALID_PARAMS if no row matches \
-                       (e.g. trimmed by the ring buffer)."
+        description = "Return a slice of the clipboard body for the capture with the given `id`. \
+                       `offset` (default 0) and `limit` (default 8000 chars, max 32000) page \
+                       through the body — paginate with `offset = text_offset + \
+                       text.chars().count()` until `truncated` is false. Errors with \
+                       INVALID_PARAMS if no row matches (e.g. trimmed by the ring buffer)."
     )]
     pub async fn get_capture(
         &self,
@@ -180,9 +183,14 @@ impl McpServer {
     ) -> Result<Json<CaptureFull>, ErrorData> {
         let storage = Arc::clone(&self.storage);
         let id = args.id;
+        let offset = args.offset.unwrap_or(0);
+        let limit = args
+            .limit
+            .unwrap_or(GET_CAPTURE_DEFAULT_LIMIT)
+            .min(GET_CAPTURE_MAX_LIMIT);
         let row = blocking(move || storage.get_by_id(id)).await?;
         match row {
-            Some(r) => Ok(Json(capture_full(r))),
+            Some(r) => Ok(Json(capture_full(r, offset, limit))),
             None => Err(ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("no capture with id {id} (may have been trimmed)"),
@@ -276,14 +284,27 @@ fn capture_summary(row: CaptureRow) -> CaptureSummary {
     }
 }
 
-fn capture_full(row: CaptureRow) -> CaptureFull {
+fn capture_full(row: CaptureRow, offset: usize, limit: usize) -> CaptureFull {
+    let (text, text_offset, text_total_chars, truncated) = match row.content.as_deref() {
+        Some(body) => {
+            let total = body.chars().count();
+            let start = offset.min(total);
+            let end = start.saturating_add(limit).min(total);
+            let slice: String = body.chars().skip(start).take(end - start).collect();
+            (Some(slice), start, total, end < total)
+        }
+        None => (None, 0, 0, false),
+    };
     CaptureFull {
         id: row.id,
         ts: row.ts.to_rfc3339(),
         kind: row.kind.as_str().to_string(),
         sha256: hex_lower(&row.sha256),
         size_bytes: row.size_bytes,
-        text: row.content,
+        text,
+        text_offset,
+        text_total_chars,
+        truncated,
         md_path: row.md_path.to_string_lossy().into_owned(),
         source_app: row.source_app,
         source_url: row.source_url,
@@ -665,7 +686,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_capture_returns_full_body_for_existing_id() {
+    async fn get_capture_returns_full_body_when_within_default_window() {
         let (server, tmp) = server_with_storage();
         let big = "y".repeat(PREVIEW_CHARS * 4);
         let id = server
@@ -674,18 +695,125 @@ mod tests {
             .unwrap();
 
         let res = server
-            .get_capture(Parameters(GetCaptureArgs { id }))
+            .get_capture(Parameters(GetCaptureArgs {
+                id,
+                offset: None,
+                limit: None,
+            }))
             .await
             .unwrap();
         assert_eq!(res.0.id, id);
         assert_eq!(res.0.text.as_deref(), Some(big.as_str()));
+        assert_eq!(res.0.text_offset, 0);
+        assert_eq!(res.0.text_total_chars, big.chars().count());
+        assert!(!res.0.truncated);
+    }
+
+    #[tokio::test]
+    async fn get_capture_pages_through_body_with_offset_and_limit() {
+        let (server, tmp) = server_with_storage();
+        // 20_000 chars — over default 8000 window, under 32000 cap.
+        let big: String = (0..20_000).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+        let id = server
+            .storage
+            .insert(&row(Utc::now(), Kind::Text, 1, Some(&big), tmp.path()))
+            .unwrap();
+
+        // Page 1: default window.
+        let p1 = server
+            .get_capture(Parameters(GetCaptureArgs {
+                id,
+                offset: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(p1.0.text_offset, 0);
+        assert_eq!(p1.0.text.as_ref().unwrap().chars().count(), 8000);
+        assert_eq!(p1.0.text_total_chars, 20_000);
+        assert!(p1.0.truncated);
+
+        // Page 2: continue from end of page 1.
+        let next_offset = p1.0.text_offset + p1.0.text.as_ref().unwrap().chars().count();
+        let p2 = server
+            .get_capture(Parameters(GetCaptureArgs {
+                id,
+                offset: Some(next_offset),
+                limit: Some(8000),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(p2.0.text_offset, 8000);
+        assert_eq!(p2.0.text.as_ref().unwrap().chars().count(), 8000);
+        assert!(p2.0.truncated);
+
+        // Page 3: tail.
+        let p3 = server
+            .get_capture(Parameters(GetCaptureArgs {
+                id,
+                offset: Some(16_000),
+                limit: Some(8000),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(p3.0.text_offset, 16_000);
+        assert_eq!(p3.0.text.as_ref().unwrap().chars().count(), 4000);
+        assert!(!p3.0.truncated);
+    }
+
+    #[tokio::test]
+    async fn get_capture_caps_oversize_limit_to_max() {
+        let (server, tmp) = server_with_storage();
+        let big = "z".repeat(50_000);
+        let id = server
+            .storage
+            .insert(&row(Utc::now(), Kind::Text, 1, Some(&big), tmp.path()))
+            .unwrap();
+
+        let res = server
+            .get_capture(Parameters(GetCaptureArgs {
+                id,
+                offset: None,
+                limit: Some(usize::MAX),
+            }))
+            .await
+            .unwrap();
+        // Caller asked for usize::MAX, server clamped to 32000.
+        assert_eq!(res.0.text.as_ref().unwrap().chars().count(), 32_000);
+        assert!(res.0.truncated);
+    }
+
+    #[tokio::test]
+    async fn get_capture_offset_past_end_returns_empty_slice() {
+        let (server, tmp) = server_with_storage();
+        let body = "small";
+        let id = server
+            .storage
+            .insert(&row(Utc::now(), Kind::Text, 1, Some(body), tmp.path()))
+            .unwrap();
+
+        let res = server
+            .get_capture(Parameters(GetCaptureArgs {
+                id,
+                offset: Some(9_999),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(res.0.text.as_deref(), Some(""));
+        assert_eq!(res.0.text_offset, body.chars().count());
+        assert!(!res.0.truncated);
     }
 
     #[tokio::test]
     async fn get_capture_errors_on_missing_id() {
         let (server, _tmp) = server_with_storage();
         let err = server
-            .get_capture(Parameters(GetCaptureArgs { id: 9_999_999 }))
+            .get_capture(Parameters(GetCaptureArgs {
+                id: 9_999_999,
+                offset: None,
+                limit: None,
+            }))
             .await
             .err()
             .expect("expected an error");
