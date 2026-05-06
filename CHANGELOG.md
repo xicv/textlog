@@ -7,6 +7,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-05-06
+
+### Changed
+
+- **MCP server `instructions` rewritten as recipe + veto.** Old text
+  only described the response shape, so Claude Code often shelled out
+  to `tl --help` + `tl logs` to "discover" features it already had
+  via MCP — wasting ~500 tokens per session before the first useful
+  call. New instructions explicitly list call recipes (`latest →
+  textlog__get_recent(n=1)`, `today → textlog__list_today`, etc.) and
+  veto the CLI path for reads. Adds ~120 tokens once at handshake,
+  recovers ~5× on every clipboard lookup. No schema or behavior
+  changes — restart Claude Code to pick up the new handshake string.
+
+## [0.1.8] - 2026-05-05
+
+### Added
+
+- **Body pagination on `textlog__get_capture`.** A 49 KB capture
+  overflowed the MCP per-tool token budget when fetched in one shot.
+  `get_capture` now accepts optional `offset` (default 0) and `limit`
+  (default 8000 chars, capped at 32000) and returns `text_offset`,
+  `text_total_chars`, and `truncated` so callers can page through any
+  size body. Bodies smaller than the default window return in one
+  shot exactly as before.
+
 ## [0.1.7] - 2026-05-04
 
 ### Changed

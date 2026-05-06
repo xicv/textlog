@@ -240,11 +240,14 @@ impl ServerHandler for McpServer {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "textlog: clipboard + OCR archive accessed via textlog__* tools. \
-             List tools (get_recent, list_today, search) return a 200-char `text_preview` \
-             plus a `truncated` flag — call textlog__get_capture(id) to fetch the full body \
-             only when the preview is insufficient. textlog__ocr_latest returns the last \
-             image's OCR text in full."
+            "textlog: macOS clipboard + OCR archive. ALWAYS use textlog__* tools — \
+             never shell out to `tl` for reads (CLI is for daemon lifecycle only). \
+             Recipes: latest clipboard → textlog__get_recent(n=1); last few items → \
+             textlog__get_recent(n=5); today's history → textlog__list_today; keyword \
+             lookup → textlog__search(query, limit=10); latest image OCR → \
+             textlog__ocr_latest. List tools return a 200-char `text_preview` + \
+             `truncated` flag; only call textlog__get_capture(id) when truncated=true \
+             and you need the full body. Skip `tl --help` / `tl logs` — same data, more tokens."
                 .into(),
         );
         info
